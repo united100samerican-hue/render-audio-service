@@ -4,6 +4,7 @@ import httpx
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from pytgcalls import PyTgCalls
+from pytgcalls.exceptions import ClientNotStarted
 
 TMP=Path("/tmp/audio")
 TMP.mkdir(parents=True, exist_ok=True)
@@ -22,8 +23,12 @@ class VoicePlayer:
     async def boot(self):
         if self.ready:
             return
-        await self.client.start()
-        self.calls.start()
+        if not self.client.is_connected():
+            await self.client.connect()
+        res=self.calls.start()
+        if asyncio.iscoroutine(res):
+            await res
+        await asyncio.sleep(1)
         self.ready=True
 
     async def _invoke(self,name,*args,**kwargs):
@@ -49,13 +54,18 @@ class VoicePlayer:
     async def start(self,chat_id,source_type,source_id,title="",duration=0):
         await self.boot()
         chat_id=str(chat_id)
-        if source_type=="url":
-            source_path=str(source_id)
-        else:
-            source_path=await self._download_telegram_file(str(source_id),chat_id)
+        source_path=str(source_id) if source_type=="url" else await self._download_telegram_file(str(source_id),chat_id)
         self.state[chat_id]={"source_type":source_type,"source_id":str(source_id),"title":title,"duration":int(duration or 0),"path":source_path,"status":"playing","position":0}
-        await self._invoke("play",int(chat_id),source_path)
-        return self.state[chat_id]
+        for _ in range(2):
+            try:
+                await self._invoke("play",int(chat_id),source_path)
+                self.state[chat_id]["status"]="playing"
+                return self.state[chat_id]
+            except ClientNotStarted:
+                self.ready=False
+                await self.boot()
+                await asyncio.sleep(1)
+        raise RuntimeError("pytgcalls_client_not_started")
 
     async def pause(self,chat_id):
         await self.boot()
