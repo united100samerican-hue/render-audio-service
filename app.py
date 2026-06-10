@@ -27,26 +27,38 @@ async def ping(x_keepalive_secret: str|None=Header(default=None)):
 async def start(req:Request,x_keepalive_secret: str|None=Header(default=None)):
     guard(x_keepalive_secret)
     body=await req.json()
-    state=await player.start(body["chatId"],body["source_type"],body["source_id"],body.get("title",""),body.get("duration",0))
-    return {"ok":True,"action":"start","state":state}
+    try:
+        state=await player.start(body["chatId"],body["source_type"],body["source_id"],body.get("title",""),body.get("duration",0))
+        return {"ok":True,"action":"start","state":state}
+    except Exception as e:
+        return {"ok":False,"error":str(e)}
 
 @app.post("/pause")
 async def pause(req:Request,x_keepalive_secret: str|None=Header(default=None)):
     guard(x_keepalive_secret)
     body=await req.json()
-    state=await player.pause(body["chatId"])
-    return {"ok":True,"action":"pause","state":state}
+    try:
+        state=await player.pause(body["chatId"])
+        return {"ok":True,"action":"pause","state":state}
+    except Exception as e:
+        return {"ok":False,"error":str(e)}
 
 @app.post("/resume")
 async def resume(req:Request,x_keepalive_secret: str|None=Header(default=None)):
     guard(x_keepalive_secret)
     body=await req.json()
-    state=await player.resume(body["chatId"])
-    return {"ok":True,"action":"resume","state":state}
+    try:
+        state=await player.resume(body["chatId"])
+        return {"ok":True,"action":"resume","state":state}
+    except Exception as e:
+        return {"ok":False,"error":str(e)}
 
 @app.post("/stop")
 async def stop(req:Request,x_keepalive_secret: str|None=Header(default=None)):
     guard(x_keepalive_secret)
     body=await req.json()
-    state=await player.stop(body["chatId"])
-    return {"ok":True,"action":"stop","state":state}
+    try:
+        state=await player.stop(body["chatId"])
+        return {"ok":True,"action":"stop","state":state}
+    except Exception as e:
+        return {"ok":False,"error":str(e)}
