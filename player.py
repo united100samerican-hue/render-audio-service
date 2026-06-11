@@ -180,4 +180,4 @@ for _ in range(2):
 
             st["position"] = max(0, int(st.get("position", 0)) + int(delta or 0))
             self.state[chat_id] = st
-            return st
+            return st 
