@@ -27,30 +27,42 @@ class VoicePlayer:
 
         self.state: dict[str, dict] = {}
         self.ready = False
+        self.calls_started = False
         self.lock = asyncio.Lock()
+        self.boot_lock = asyncio.Lock()
 
     async def boot(self):
-        if self.ready:
+        if self.ready and self.calls_started:
             return
 
-        if not self.client.is_connected():
-            # Telethon recommends starting bots with bot_token explicitly.
-            if self.bot_token:
-                await self.client.start(bot_token=self.bot_token)
-            else:
-                await self.client.start()
+        async with self.boot_lock:
+            if self.ready and self.calls_started:
+                return
 
-        res = self.calls.start()
-        if asyncio.iscoroutine(res):
-            await res
+            if not self.client.is_connected():
+                if self.bot_token:
+                    await self.client.start(bot_token=self.bot_token)
+                else:
+                    await self.client.start()
 
-        await asyncio.sleep(1)
-        self.ready = True
+            if not self.calls_started:
+                try:
+                    res = self.calls.start()
+                    if asyncio.iscoroutine(res):
+                        await res
+                except Exception as e:
+                    msg = str(e).lower()
+                    if "already running" not in msg:
+                        raise
+                self.calls_started = True
+
+            self.ready = True
 
     async def _invoke(self, name, *args, **kwargs):
         fn = getattr(self.calls, name, None)
         if not fn:
             raise RuntimeError(f"missing_method:{name}")
+
         res = fn(*args, **kwargs)
         return await res if asyncio.iscoroutine(res) else res
 
@@ -64,6 +76,7 @@ class VoicePlayer:
                 params={"file_id": file_id},
             )
             g.raise_for_status()
+
             j = g.json()
             file_path = j["result"]["file_path"]
             ext = Path(file_path).suffix or ".mp3"
@@ -107,12 +120,19 @@ class VoicePlayer:
                         await self._invoke("play", int(chat_id), source_path)
                     except TypeError:
                         await self._invoke("play", chat_id=int(chat_id), media=source_path)
+
                     self.state[chat_id]["status"] = "playing"
                     return self.state[chat_id]
+
                 except Exception as e:
                     last_error = e
-                    self.ready = False
-                    await self.boot()
+                    msg = str(e).lower()
+
+                    if "already running" in msg:
+                        self.calls_started = True
+                        self.ready = True
+                        continue
+
                     await asyncio.sleep(1)
 
             raise RuntimeError(f"play_failed:{last_error}")
