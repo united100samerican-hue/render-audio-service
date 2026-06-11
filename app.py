@@ -33,15 +33,17 @@ async def ping(x_keepalive_secret: str | None = Header(default=None)):
 async def start(req: Request, x_keepalive_secret: str | None = Header(default=None)):
     guard(x_keepalive_secret)
     body = await req.json()
-    try:
-        state = await player.start(
+    asyncio.create_task(
+        player.start(
             body["chatId"],
             body["source_type"],
             body["source_id"],
             body.get("title", ""),
             body.get("duration", 0),
         )
-        return {"ok": True, "action": "start", "state": state}
+    )
+    return {"ok": True, "action": "start", "queued": True}
+
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
