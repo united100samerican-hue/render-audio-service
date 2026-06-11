@@ -1,52 +1,44 @@
+# app.py
 import os
 from fastapi import FastAPI, Header, HTTPException, Request
 from player import VoicePlayer
 
 app = FastAPI()
 player = VoicePlayer()
-
 SECRET = os.getenv("KEEPALIVE_SECRET", "").strip()
-
 
 def guard(v: str | None):
     if SECRET and (v or "").strip() != SECRET:
         raise HTTPException(status_code=403, detail="forbidden")
 
-
 @app.on_event("startup")
 async def startup():
     await player.boot()
 
-
 @app.get("/")
 async def root():
     return {"ok": True}
-
 
 @app.get("/ping")
 async def ping(x_keepalive_secret: str | None = Header(default=None)):
     guard(x_keepalive_secret)
     return {"ok": True}
 
-
 @app.post("/start")
 async def start(req: Request, x_keepalive_secret: str | None = Header(default=None)):
     guard(x_keepalive_secret)
     body = await req.json()
-    asyncio.create_task(
-        player.start(
+    try:
+        state = await player.start(
             body["chatId"],
             body["source_type"],
             body["source_id"],
             body.get("title", ""),
             body.get("duration", 0),
         )
-    )
-    return {"ok": True, "action": "start", "queued": True}
-
+        return {"ok": True, "action": "start", "state": state}
     except Exception as e:
         return {"ok": False, "error": str(e)}
-
 
 @app.post("/pause")
 async def pause(req: Request, x_keepalive_secret: str | None = Header(default=None)):
@@ -58,7 +50,6 @@ async def pause(req: Request, x_keepalive_secret: str | None = Header(default=No
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-
 @app.post("/resume")
 async def resume(req: Request, x_keepalive_secret: str | None = Header(default=None)):
     guard(x_keepalive_secret)
@@ -69,7 +60,6 @@ async def resume(req: Request, x_keepalive_secret: str | None = Header(default=N
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-
 @app.post("/stop")
 async def stop(req: Request, x_keepalive_secret: str | None = Header(default=None)):
     guard(x_keepalive_secret)
@@ -79,7 +69,6 @@ async def stop(req: Request, x_keepalive_secret: str | None = Header(default=Non
         return {"ok": True, "action": "stop", "state": state}
     except Exception as e:
         return {"ok": False, "error": str(e)}
-
 
 @app.post("/seek")
 async def seek(req: Request, x_keepalive_secret: str | None = Header(default=None)):
