@@ -1,3 +1,4 @@
+# player.py
 import asyncio
 import os
 import uuid
@@ -11,7 +12,6 @@ from pytgcalls import PyTgCalls
 TMP = Path("/tmp/audio")
 TMP.mkdir(parents=True, exist_ok=True)
 
-
 class VoicePlayer:
     def __init__(self):
         self.api_id = int(os.getenv("API_ID", "0"))
@@ -24,8 +24,7 @@ class VoicePlayer:
 
         self.client = TelegramClient(StringSession(self.session), self.api_id, self.api_hash)
         self.calls = PyTgCalls(self.client)
-
-        self.state: dict[str, dict] = {}
+        self.state = {}
         self.ready = False
         self.calls_started = False
         self.lock = asyncio.Lock()
@@ -40,20 +39,12 @@ class VoicePlayer:
                 return
 
             if not self.client.is_connected():
-                if self.bot_token:
-                    await self.client.start(bot_token=self.bot_token)
-                else:
-                    await self.client.start()
+                await self.client.start()
 
             if not self.calls_started:
-                try:
-                    res = self.calls.start()
-                    if asyncio.iscoroutine(res):
-                        await res
-                except Exception as e:
-                    msg = str(e).lower()
-                    if "already running" not in msg:
-                        raise
+                res = self.calls.start()
+                if asyncio.iscoroutine(res):
+                    await res
                 self.calls_started = True
 
             self.ready = True
@@ -76,7 +67,6 @@ class VoicePlayer:
                 params={"file_id": file_id},
             )
             g.raise_for_status()
-
             j = g.json()
             file_path = j["result"]["file_path"]
             ext = Path(file_path).suffix or ".mp3"
@@ -100,7 +90,6 @@ class VoicePlayer:
         async with self.lock:
             await self.boot()
             chat_id = str(chat_id)
-
             source_path = await self._resolve_source(chat_id, source_type, source_id)
 
             self.state[chat_id] = {
@@ -114,25 +103,25 @@ class VoicePlayer:
             }
 
             last_error = None
-for _ in range(2):
-    try:
-        print("before_play", chat_id, source_path)
-        try:
-            await self._invoke("play", int(chat_id), source_path)
-        except TypeError:
-            await self._invoke("play", chat_id=int(chat_id), media=source_path)
-        print("after_play", chat_id)
-        self.state[chat_id]["status"] = "playing"
-        return self.state[chat_id]
-    except Exception as e:
-        last_error = e
-        msg = str(e).lower()
-        print("play_error", chat_id, msg)
-        if "already running" in msg:
-            self.calls_started = True
-            self.ready = True
-            continue
-        await asyncio.sleep(1)
+            for _ in range(2):
+                try:
+                    print("before_play", chat_id, source_path)
+                    try:
+                        await self._invoke("play", int(chat_id), source_path)
+                    except TypeError:
+                        await self._invoke("play", chat_id=int(chat_id), media=source_path)
+                    print("after_play", chat_id)
+                    self.state[chat_id]["status"] = "playing"
+                    return self.state[chat_id]
+                except Exception as e:
+                    last_error = e
+                    msg = str(e).lower()
+                    print("play_error", chat_id, msg)
+                    if "already running" in msg:
+                        self.calls_started = True
+                        self.ready = True
+                        continue
+                    await asyncio.sleep(1)
 
             raise RuntimeError(f"play_failed:{last_error}")
 
@@ -174,10 +163,9 @@ for _ in range(2):
             await self.boot()
             chat_id = str(chat_id)
             st = self.state.get(chat_id)
-
             if not st:
                 return {}
 
             st["position"] = max(0, int(st.get("position", 0)) + int(delta or 0))
             self.state[chat_id] = st
-            return st 
+            return st
