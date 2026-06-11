@@ -114,26 +114,25 @@ class VoicePlayer:
             }
 
             last_error = None
-            for _ in range(2):
-                try:
-                    try:
-                        await self._invoke("play", int(chat_id), source_path)
-                    except TypeError:
-                        await self._invoke("play", chat_id=int(chat_id), media=source_path)
-
-                    self.state[chat_id]["status"] = "playing"
-                    return self.state[chat_id]
-
-                except Exception as e:
-                    last_error = e
-                    msg = str(e).lower()
-
-                    if "already running" in msg:
-                        self.calls_started = True
-                        self.ready = True
-                        continue
-
-                    await asyncio.sleep(1)
+for _ in range(2):
+    try:
+        print("before_play", chat_id, source_path)
+        try:
+            await self._invoke("play", int(chat_id), source_path)
+        except TypeError:
+            await self._invoke("play", chat_id=int(chat_id), media=source_path)
+        print("after_play", chat_id)
+        self.state[chat_id]["status"] = "playing"
+        return self.state[chat_id]
+    except Exception as e:
+        last_error = e
+        msg = str(e).lower()
+        print("play_error", chat_id, msg)
+        if "already running" in msg:
+            self.calls_started = True
+            self.ready = True
+            continue
+        await asyncio.sleep(1)
 
             raise RuntimeError(f"play_failed:{last_error}")
 
