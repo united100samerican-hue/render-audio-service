@@ -22,13 +22,18 @@ class VoicePlayer:
         if not self.api_id or not self.api_hash or not self.session:
             raise RuntimeError("missing_render_env")
 
-        self.client = TelegramClient(StringSession(self.session), self.api_id, self.api_hash)
-        self.calls = PyTgCalls(self.client)
+        self.client = None
+        self.calls = None
         self.state = {}
         self.ready = False
         self.calls_started = False
         self.lock = asyncio.Lock()
         self.boot_lock = asyncio.Lock()
+
+    def _ensure_objects(self):
+        if self.client is None or self.calls is None:
+            self.client = TelegramClient(StringSession(self.session), self.api_id, self.api_hash)
+            self.calls = PyTgCalls(self.client)
 
     async def boot(self):
         if self.ready and self.calls_started:
@@ -37,6 +42,8 @@ class VoicePlayer:
         async with self.boot_lock:
             if self.ready and self.calls_started:
                 return
+
+            self._ensure_objects()
 
             if not self.client.is_connected():
                 await self.client.start()
@@ -67,6 +74,7 @@ class VoicePlayer:
                 params={"file_id": file_id},
             )
             g.raise_for_status()
+
             j = g.json()
             file_path = j["result"]["file_path"]
             ext = Path(file_path).suffix or ".mp3"
