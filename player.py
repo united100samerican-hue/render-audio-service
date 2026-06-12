@@ -127,20 +127,36 @@ class VoicePlayer:
             return self.state.get(chat_id,{})
 
     async def stop(self,chat_id):
-        async with self.lock:
-            await self.boot()
-            chat_id=str(chat_id)
-            st=self.state.pop(chat_id,None)
+    async with self.lock:
+        await self.boot()
+        chat_id=str(chat_id)
+        st=self.state.pop(chat_id,None)
+        for name,args in (("leave_group_call",(int(chat_id),)),("leave_current_group_call",()),("stop",(int(chat_id),))):
+            fn=getattr(self.calls,name,None)
+            if not fn:
+                continue
             try:
-                await self._invoke("stop",int(chat_id))
+                res=fn(*args)
+                if asyncio.iscoroutine(res):
+                    await res
+                break
             except Exception as e:
-                print("stop_error",chat_id,str(e))
-            if st and st.get("path"):
-                try:
-                    Path(st["path"]).unlink(missing_ok=True)
-                except Exception:
-                    pass
-            return st or {}
+                print("stop_method_error",name,str(e))
+        if st and st.get("path"):
+            try:
+                Path(st["path"]).unlink(missing_ok=True)
+            except Exception:
+                pass
+        if not any(getattr(self.calls,n,None) for n in ("leave_group_call","leave_current_group_call","stop")):
+            try:
+                await self.client.disconnect()
+            except Exception:
+                pass
+            self.client=None
+            self.calls=None
+            self.ready=False
+            self.calls_started=False
+        return st or {}
 
     async def seek(self,chat_id,delta=0):
         async with self.lock:
