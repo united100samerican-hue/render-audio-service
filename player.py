@@ -159,10 +159,15 @@ class VoicePlayer:
                     await self.client.disconnect()
                 except Exception as e:
                     print("stop_disconnect_error", str(e))
-                self.client = None
-                self.calls = None
-                self.ready = False
-                self.calls_started = False
+            else:
+                try:
+                    await self.client.disconnect()
+                except Exception as e:
+                    print("stop_disconnect_error", str(e))
+            self.client = None
+            self.calls = None
+            self.ready = False
+            self.calls_started = False
             if st and st.get("path"):
                 try:
                     Path(st["path"]).unlink(missing_ok=True)
