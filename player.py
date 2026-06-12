@@ -1,4 +1,4 @@
-import asyncio, os, uuid
+import asyncio,os,uuid
 from pathlib import Path
 import httpx
 from telethon import TelegramClient
@@ -23,16 +23,16 @@ class VoicePlayer:
         self.calls_started=False
         self.lock=asyncio.Lock()
         self.boot_lock=asyncio.Lock()
+
     def _ensure_objects(self):
         if self.client is None or self.calls is None:
             self.client=TelegramClient(StringSession(self.session),self.api_id,self.api_hash)
             self.calls=PyTgCalls(self.client)
+
     async def boot(self):
-        if self.ready and self.calls_started:
-            return
+        if self.ready and self.calls_started:return
         async with self.boot_lock:
-            if self.ready and self.calls_started:
-                return
+            if self.ready and self.calls_started:return
             self._ensure_objects()
             if not self.client.is_connected():
                 await self.client.start()
@@ -42,12 +42,14 @@ class VoicePlayer:
                     await res
                 self.calls_started=True
             self.ready=True
+
     async def _invoke(self,name,*args,**kwargs):
         fn=getattr(self.calls,name,None)
         if not fn:
             raise RuntimeError(f"missing_method:{name}")
         res=fn(*args,**kwargs)
         return await res if asyncio.iscoroutine(res) else res
+
     async def _download_telegram_file(self,file_id:str,chat_id:str)->str:
         if not self.bot_token:
             raise RuntimeError("missing_bot_token")
@@ -62,12 +64,14 @@ class VoicePlayer:
             d.raise_for_status()
             out.write_bytes(d.content)
             return str(out)
+
     async def _resolve_source(self,chat_id:str,source_type:str,source_id:str)->str:
         source_type=str(source_type or "").strip().lower()
         source_id=str(source_id or "").strip()
         if source_type=="url":
             return source_id
         return await self._download_telegram_file(source_id,chat_id)
+
     async def start(self,chat_id,source_type,source_id,title="",duration=0):
         async with self.lock:
             await self.boot()
@@ -95,6 +99,7 @@ class VoicePlayer:
                         continue
                     await asyncio.sleep(1)
             raise RuntimeError(f"play_failed:{last_error}")
+
     async def pause(self,chat_id):
         async with self.lock:
             await self.boot()
@@ -106,6 +111,7 @@ class VoicePlayer:
             if chat_id in self.state:
                 self.state[chat_id]["status"]="paused"
             return self.state.get(chat_id,{})
+
     async def resume(self,chat_id):
         async with self.lock:
             await self.boot()
@@ -117,45 +123,51 @@ class VoicePlayer:
             if chat_id in self.state:
                 self.state[chat_id]["status"]="playing"
             return self.state.get(chat_id,{})
+
     async def stop(self,chat_id):
         async with self.lock:
             await self.boot()
             chat_id=str(chat_id)
             st=self.state.pop(chat_id,None)
-            try:
-                try:
-                    res=self._invoke("leave_current_group_call")
-                    if asyncio.iscoroutine(res):
-                        await res
-                except Exception as e1:
-                    print("stop_method_error","leave_current_group_call",str(e1))
-                    try:
-                        res=self._invoke("leave_group_call",int(chat_id))
-                        if asyncio.iscoroutine(res):
-                            await res
-                    except Exception as e2:
-                        print("stop_method_error","leave_group_call",str(e2))
+            method_hit=False
+            targets=(self.calls,getattr(self.calls,"group_call",None),getattr(self.calls,"mtproto",None),getattr(self.calls,"_group_call",None),getattr(self.calls,"_call",None))
+            names=("leave_current_group_call","leave_group_call","stop","hangup","close")
+            for obj in targets:
+                if not obj:continue
+                for name in names:
+                    fn=getattr(obj,name,None)
+                    if not callable(fn):continue
+                    for args in ((),(int(chat_id),)):
                         try:
-                            res=self._invoke("stop",int(chat_id))
+                            res=fn(*args)
                             if asyncio.iscoroutine(res):
                                 await res
-                        except Exception as e3:
-                            print("stop_method_error","stop",str(e3))
-            finally:
-                try:
-                    await self.client.disconnect()
-                except Exception as e:
-                    print("stop_disconnect_error",str(e))
-                self.client=None
-                self.calls=None
-                self.ready=False
-                self.calls_started=False
+                            method_hit=True
+                            break
+                        except TypeError:
+                            continue
+                        except Exception as e:
+                            print("stop_method_error",name,str(e))
+                            break
+                    if method_hit:break
+                if method_hit:break
+            if not method_hit:
+                print("stop_methods_available",[n for n in dir(self.calls) if any(k in n.lower() for k in ("leave","stop","hangup","close"))])
+            try:
+                await self.client.disconnect()
+            except Exception as e:
+                print("stop_disconnect_error",str(e))
+            self.client=None
+            self.calls=None
+            self.ready=False
+            self.calls_started=False
             if st and st.get("path"):
                 try:
                     Path(st["path"]).unlink(missing_ok=True)
                 except Exception:
                     pass
             return st or {}
+
     async def seek(self,chat_id,delta=0):
         async with self.lock:
             await self.boot()
