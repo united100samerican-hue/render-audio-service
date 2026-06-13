@@ -3,6 +3,7 @@ from pathlib import Path
 import httpx
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+from telethon.tl import functions
 from pytgcalls import PyTgCalls
 
 TMP=Path("/tmp/audio")
@@ -49,19 +50,6 @@ class VoicePlayer:
             raise RuntimeError(f"missing_method:{name}")
         res=fn(*args,**kwargs)
         return await res if asyncio.iscoroutine(res) else res
-
-    def _walk(self,obj,depth=0,seen=None):
-        if seen is None: seen=set()
-        if obj is None or id(obj) in seen or depth>3:return
-        seen.add(id(obj))
-        yield obj
-        for key in ("group_call","mtproto","_group_call","_mtproto","_call","_calls","calls","client","_client","raw","_raw","bridge","_bridge","current","_current"):
-            try:
-                child=getattr(obj,key)
-            except Exception:
-                continue
-            if child is not None:
-                yield from self._walk(child,depth+1,seen)
 
     async def _download_telegram_file(self,file_id:str,chat_id:str)->str:
         if not self.bot_token:
@@ -141,33 +129,58 @@ class VoicePlayer:
         async with self.lock:
             await self.boot()
             chat_id=int(chat_id)
-            st=self.state.pop(str(chat_id),None)
-            done=False
+            key=str(chat_id)
+            st=self.state.get(key)
             errors=[]
-            candidates=list(self._walk(self.calls))
-            for obj in candidates:
-                for name in ("stop","leave_current_group_call","leave_group_call","hangup","close"):
-                    fn=getattr(obj,name,None)
-                    if not callable(fn):
-                        continue
-                    for args in ((),(chat_id,)):
-                        try:
-                            res=fn(*args)
-                            if asyncio.iscoroutine(res):
-                                await res
-                            done=True
-                            break
-                        except TypeError:
-                            continue
-                        except Exception as e:
-                            errors.append(f"{name}:{e}")
-                            break
-                    if done:
-                        break
-                if done:
-                    break
+            done=False
+
+            try:
+                entity=await self.client.get_entity(chat_id)
+                full=await self.client(functions.channels.GetFullChannelRequest(channel=entity))
+                call=getattr(getattr(full,"full_chat",None),"call",None)
+                if call:
+                    try:
+                        res=self.client(functions.phone.LeaveGroupCallRequest(call=call,source=0))
+                    except TypeError:
+                        res=self.client(functions.phone.LeaveGroupCallRequest(call=call))
+                    if asyncio.iscoroutine(res):
+                        await res
+                    done=True
+            except Exception as e:
+                errors.append(f"raw_leave:{e}")
+
             if not done:
-                print("stop_fallback_methods",[n for n in dir(self.calls) if any(k in n.lower() for k in ("stop","leave","hangup","close"))])
+                targets=(self.calls,getattr(self.calls,"group_call",None),getattr(self.calls,"mtproto",None),getattr(self.calls,"_group_call",None),getattr(self.calls,"_call",None))
+                for obj in targets:
+                    if not obj:continue
+                    for name in ("stop","leave_current_group_call","leave_group_call","hangup","close"):
+                        fn=getattr(obj,name,None)
+                        if not callable(fn):continue
+                        for args in ((chat_id,),()):
+                            try:
+                                res=fn(*args)
+                                if asyncio.iscoroutine(res):
+                                    await res
+                                done=True
+                                break
+                            except TypeError:
+                                continue
+                            except Exception as e:
+                                errors.append(f"{name}:{e}")
+                                break
+                        if done:break
+                    if done:break
+
+            if not done:
+                raise RuntimeError("no_leave_method:" + " | ".join(errors[-3:]))
+
+            st=self.state.pop(key,None)
+            if st and st.get("path"):
+                try:
+                    Path(st["path"]).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
             try:
                 await self.client.disconnect()
             except Exception as e:
@@ -176,11 +189,6 @@ class VoicePlayer:
             self.calls=None
             self.ready=False
             self.calls_started=False
-            if st and st.get("path"):
-                try:
-                    Path(st["path"]).unlink(missing_ok=True)
-                except Exception:
-                    pass
             return st or {}
 
     async def seek(self,chat_id,delta=0):
