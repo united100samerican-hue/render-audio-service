@@ -1,4 +1,4 @@
-import asyncio,os,uuid
+import asyncio, os, uuid
 from pathlib import Path
 import httpx
 from telethon import TelegramClient
@@ -7,7 +7,7 @@ from telethon.tl import functions
 from pytgcalls import PyTgCalls
 
 TMP=Path("/tmp/audio")
-TMP.mkdir(parents=True,exist_ok=True)
+TMP.mkdir(parents=True, exist_ok=True)
 
 class VoicePlayer:
     def __init__(self):
@@ -15,6 +15,8 @@ class VoicePlayer:
         self.api_hash=os.getenv("API_HASH","").strip()
         self.session=os.getenv("SESSION_STRING","").strip()
         self.bot_token=os.getenv("BOT_TOKEN","").strip()
+        self.yt_cookies_text=os.getenv("YT_COOKIES_TEXT","")
+        self.yt_cookies_file=os.getenv("YT_COOKIES_FILE","").strip()
         if not self.api_id or not self.api_hash or not self.session:
             raise RuntimeError("missing_render_env")
         self.client=None
@@ -29,6 +31,24 @@ class VoicePlayer:
         if self.client is None or self.calls is None:
             self.client=TelegramClient(StringSession(self.session),self.api_id,self.api_hash)
             self.calls=PyTgCalls(self.client)
+
+    def _cookiefile(self):
+        if self.yt_cookies_file:
+            p=Path(self.yt_cookies_file)
+            if p.exists():
+                return str(p)
+        txt=self.yt_cookies_text
+        if txt and txt.strip():
+            p=TMP/"yt_cookies.txt"
+            current=""
+            try:
+                current=p.read_text(encoding="utf-8")
+            except Exception:
+                current=""
+            if current!=txt:
+                p.write_text(txt,encoding="utf-8")
+            return str(p)
+        return ""
 
     async def boot(self):
         if self.ready and self.calls_started:return
@@ -66,11 +86,47 @@ class VoicePlayer:
             out.write_bytes(d.content)
             return str(out)
 
+    async def _download_url(self,url:str,chat_id:str)->str:
+        try:
+            import yt_dlp
+        except Exception as e:
+            raise RuntimeError(f"missing_yt_dlp:{e}")
+        url=str(url or "").strip()
+        if not url:
+            raise RuntimeError("empty_url")
+        cookiefile=self._cookiefile()
+        prefix=f"{chat_id}_{uuid.uuid4().hex}"
+        outtmpl=str(TMP/f"{prefix}.%(ext)s")
+        opts={
+            "format":"bestaudio/best",
+            "outtmpl":outtmpl,
+            "noplaylist":True,
+            "quiet":True,
+            "no_warnings":True,
+            "retries":3,
+            "socket_timeout":30,
+        }
+        if cookiefile:
+            opts["cookiefile"]=cookiefile
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info=ydl.extract_info(url,download=True)
+            fn=ydl.prepare_filename(info)
+            p=Path(fn)
+            if p.exists():
+                return str(p)
+        for cand in TMP.glob(f"{prefix}.*"):
+            if cand.is_file():
+                return str(cand)
+        raise RuntimeError("yt_dlp_download_failed")
+
     async def _resolve_source(self,chat_id:str,source_type:str,source_id:str)->str:
         source_type=str(source_type or "").strip().lower()
         source_id=str(source_id or "").strip()
-        if source_type=="url":
-            return source_id
+        sid=source_id.lower()
+        if source_type=="url" or sid.startswith(("http://","https://")) or "youtu.be/" in sid or "youtube.com/" in sid:
+            if not source_id.startswith(("http://","https://")):
+                source_id=f"https://{source_id}"
+            return await self._download_url(source_id,chat_id)
         return await self._download_telegram_file(source_id,chat_id)
 
     async def start(self,chat_id,source_type,source_id,title="",duration=0):
