@@ -1,6 +1,5 @@
 import asyncio, os, uuid
 from pathlib import Path
-
 import httpx
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -18,6 +17,7 @@ class VoicePlayer:
         self.bot_token = os.getenv("BOT_TOKEN", "").strip()
         self.yt_cookies_text = os.getenv("YT_COOKIES_TEXT", "").strip()
         self.yt_cookies_file = os.getenv("YT_COOKIES_FILE", "").strip()
+        self.pot_provider_url = os.getenv("POT_PROVIDER_URL", "").strip() or "http://127.0.0.1:4416"
 
         if not self.api_id or not self.api_hash or not self.session:
             raise RuntimeError("missing_render_env")
@@ -89,18 +89,13 @@ class VoicePlayer:
     async def _download_telegram_file(self, file_id: str, chat_id: str) -> str:
         if not self.bot_token:
             raise RuntimeError("missing_bot_token")
-
         async with httpx.AsyncClient(timeout=120) as h:
-            g = await h.get(
-                f"https://api.telegram.org/bot{self.bot_token}/getFile",
-                params={"file_id": file_id},
-            )
+            g = await h.get(f"https://api.telegram.org/bot{self.bot_token}/getFile", params={"file_id": file_id})
             g.raise_for_status()
             j = g.json()
             file_path = j["result"]["file_path"]
             ext = Path(file_path).suffix or ".mp3"
             out = TMP / f"{chat_id}_{uuid.uuid4().hex}{ext}"
-
             d = await h.get(f"https://api.telegram.org/file/bot{self.bot_token}/{file_path}")
             d.raise_for_status()
             out.write_bytes(d.content)
@@ -126,7 +121,10 @@ class VoicePlayer:
                     "youtube": {
                         "player_client": ["mweb"],
                         "formats": ["missing_pot"],
-                    }
+                    },
+                    "youtubepot-bgutilhttp": {
+                        "base_url": [self.pot_provider_url],
+                    },
                 },
                 "format": "bestaudio/best",
             },
@@ -135,7 +133,10 @@ class VoicePlayer:
                     "youtube": {
                         "player_client": ["web_safari"],
                         "formats": ["missing_pot"],
-                    }
+                    },
+                    "youtubepot-bgutilhttp": {
+                        "base_url": [self.pot_provider_url],
+                    },
                 },
                 "format": "bestaudio[protocol^=m3u8]/bestaudio/best",
             },
@@ -204,7 +205,6 @@ class VoicePlayer:
                 "status": "playing",
                 "position": 0,
             }
-
             last_error = None
             for _ in range(2):
                 try:
