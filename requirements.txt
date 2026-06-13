@@ -3,5 +3,4 @@ uvicorn[standard]
 httpx
 telethon
 py-tgcalls
-yt-dlp
-bgutil-ytdlp-pot-provider
+yt-dlp>=2025.12.8
