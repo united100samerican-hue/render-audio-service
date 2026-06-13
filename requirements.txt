@@ -4,3 +4,4 @@ httpx
 telethon
 py-tgcalls
 yt-dlp
+bgutil-ytdlp-pot-provider
