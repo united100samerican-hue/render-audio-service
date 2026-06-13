@@ -9,6 +9,7 @@ from pytgcalls import PyTgCalls
 TMP = Path("/tmp/audio")
 TMP.mkdir(parents=True, exist_ok=True)
 
+
 class VoicePlayer:
     def __init__(self):
         self.api_id = int(os.getenv("API_ID", "0"))
@@ -115,36 +116,43 @@ class VoicePlayer:
         prefix = f"{chat_id}_{uuid.uuid4().hex}"
         outtmpl = str(TMP / f"{prefix}.%(ext)s")
 
+        # قائمة المحاولات بترتيب الأولوية
+        # android_vr: أفضل خيار - لا يحتاج JS runtime ويوفر صيغ صوتية حقيقية
+        # tv: خيار احتياطي - يعمل بدون JS runtime في معظم الحالات
+        # web: خيار أخير - قد يحتاج JS runtime
         attempts = [
             {
                 "extractor_args": {
                     "youtube": {
-                        "player_client": ["mweb"],
-                        "formats": ["missing_pot"],
-                    },
-                    "youtubepot-bgutilhttp": {
-                        "base_url": [self.pot_provider_url],
+                        "player_client": ["android_vr"],
+                        "player_skip": ["webpage", "configs", "js"],
                     },
                 },
-                "format": "bestaudio/best",
+                "format": "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best[ext=mp4]/best",
+            },
+            {
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["tv"],
+                        "player_skip": ["webpage", "configs", "js"],
+                    },
+                },
+                "format": "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
             },
             {
                 "extractor_args": {
                     "youtube": {
                         "player_client": ["web_safari"],
-                        "formats": ["missing_pot"],
-                    },
-                    "youtubepot-bgutilhttp": {
-                        "base_url": [self.pot_provider_url],
+                        "player_skip": ["webpage", "configs", "js"],
                     },
                 },
-                "format": "bestaudio[protocol^=m3u8]/bestaudio/best",
+                "format": "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
             },
         ]
 
         last_error = None
 
-        for attempt in attempts:
+        for idx, attempt in enumerate(attempts):
             def _do():
                 opts = {
                     "format": attempt["format"],
@@ -152,24 +160,42 @@ class VoicePlayer:
                     "noplaylist": True,
                     "quiet": True,
                     "no_warnings": True,
-                    "retries": 3,
-                    "socket_timeout": 30,
+                    "retries": 5,
+                    "fragment_retries": 5,
+                    "socket_timeout": 45,
                     "nocheckcertificate": True,
                     "extractor_args": attempt["extractor_args"],
+                    "geo_bypass": True,
+                    "ignoreerrors": False,
+                    "noprogress": True,
+                    "concurrent_fragment_downloads": 3,
                 }
                 if cookiefile:
                     opts["cookiefile"] = cookiefile
 
                 with yt_dlp.YoutubeDL(opts) as ydl:
-                    ydl.download([url])
+                    info = ydl.extract_info(url, download=True)
+                    if info is None:
+                        raise RuntimeError("extract_info returned None")
 
             try:
-                await asyncio.to_thread(_do)
+                await asyncio.wait_for(
+                    asyncio.to_thread(_do),
+                    timeout=120
+                )
                 for cand in TMP.glob(f"{prefix}.*"):
-                    if cand.is_file():
+                    if cand.is_file() and cand.stat().st_size > 1024:
                         return str(cand)
+            except asyncio.TimeoutError:
+                last_error = Exception(f"attempt_{idx+1}_timeout")
             except Exception as e:
                 last_error = e
+                # إذا كان الخطأ يتعلق بعدم توفر الصيغ، جرب المحاولة التالية
+                if "format" in str(e).lower() or "requested format" in str(e).lower():
+                    continue
+                # إذا كان الخطأ يتعلق بـ n-challenge، جرب المحاولة التالية
+                if "n challenge" in str(e).lower() or "n parameter" in str(e).lower():
+                    continue
 
         raise RuntimeError(f"yt_dlp_download_failed:{last_error}")
 
