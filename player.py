@@ -17,10 +17,8 @@ class VoicePlayer:
         self.bot_token = os.getenv("BOT_TOKEN", "").strip()
         self.yt_cookies_text = os.getenv("YT_COOKIES_TEXT", "").strip()
         self.yt_cookies_file = os.getenv("YT_COOKIES_FILE", "").strip()
-
         if not self.api_id or not self.api_hash or not self.session:
             raise RuntimeError("missing_render_env")
-
         self.client = None
         self.calls = None
         self.state = {}
@@ -39,7 +37,6 @@ class VoicePlayer:
             p = Path(self.yt_cookies_file)
             if p.exists():
                 return str(p)
-
         if self.yt_cookies_text:
             p = TMP / "yt_cookies.txt"
             try:
@@ -49,8 +46,19 @@ class VoicePlayer:
             if current != self.yt_cookies_text:
                 p.write_text(self.yt_cookies_text, encoding="utf-8")
             return str(p)
-
         return ""
+
+    def _is_url(self, s):
+        s = str(s or "").strip().lower()
+        return s.startswith(("http://", "https://")) or "youtu.be/" in s or "youtube.com/" in s or "music.youtube.com/" in s
+
+    def _looks_like_file_id(self, s):
+        s = str(s or "").strip()
+        if not s or self._is_url(s):
+            return False
+        if " " in s:
+            return False
+        return len(s) > 20 and "/" not in s and "\\" not in s
 
     async def boot(self):
         if self.ready and self.calls_started:
@@ -78,51 +86,17 @@ class VoicePlayer:
     async def _download_telegram_file(self, file_id: str, chat_id: str) -> str:
         if not self.bot_token:
             raise RuntimeError("missing_bot_token")
-
         async with httpx.AsyncClient(timeout=120) as h:
-            g = await h.get(
-                f"https://api.telegram.org/bot{self.bot_token}/getFile",
-                params={"file_id": file_id},
-            )
+            g = await h.get(f"https://api.telegram.org/bot{self.bot_token}/getFile", params={"file_id": file_id})
             g.raise_for_status()
             j = g.json()
             file_path = j["result"]["file_path"]
             ext = Path(file_path).suffix or ".mp3"
             out = TMP / f"{chat_id}_{uuid.uuid4().hex}{ext}"
-
             d = await h.get(f"https://api.telegram.org/file/bot{self.bot_token}/{file_path}")
             d.raise_for_status()
             out.write_bytes(d.content)
             return str(out)
-
-    def _score_format(self, f):
-        ext = str(f.get("ext") or "").lower()
-        abr = float(f.get("abr") or 0)
-        tbr = float(f.get("tbr") or 0)
-        size = float(f.get("filesize") or f.get("filesize_approx") or 0)
-
-        ext_bonus = 0
-        if ext == "m4a":
-            ext_bonus = 3
-        elif ext in ("mp4", "webm", "ogg", "opus"):
-            ext_bonus = 2
-        elif ext:
-            ext_bonus = 1
-
-        audio_only = 1 if str(f.get("vcodec") or "").lower() == "none" and str(f.get("acodec") or "").lower() != "none" else 0
-        has_url = 1 if f.get("url") else 0
-
-        return (has_url, audio_only, ext_bonus, abr, tbr, size)
-
-    def _pick_format(self, info):
-        fmts = info.get("formats") or []
-        usable = [f for f in fmts if f.get("url") and str(f.get("acodec") or "").lower() != "none"]
-        if not usable:
-            usable = [f for f in fmts if f.get("url")]
-        if not usable:
-            return None
-        usable.sort(key=self._score_format, reverse=True)
-        return usable[0]
 
     async def _download_url(self, url: str, chat_id: str) -> str:
         try:
@@ -138,66 +112,63 @@ class VoicePlayer:
         prefix = f"{chat_id}_{uuid.uuid4().hex}"
         outtmpl = str(TMP / f"{prefix}.%(ext)s")
 
-        info_opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-            "skip_download": True,
-            "retries": 3,
-            "socket_timeout": 30,
-            "nocheckcertificate": True,
+        extractor_args = {
+            "youtube": {
+                "formats": ["missing_pot"],
+                "player_client": ["web", "web_music", "web_embedded", "tv", "default"],
+            }
         }
-        if cookiefile:
-            info_opts["cookiefile"] = cookiefile
 
-        with yt_dlp.YoutubeDL(info_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        attempts = [
+            "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
+            "best",
+        ]
 
-        fmt = self._pick_format(info)
-        if not fmt:
-            raise RuntimeError("no_usable_audio_format")
+        last_error = None
 
-        format_id = str(fmt.get("format_id") or "").strip()
-        if not format_id:
-            raise RuntimeError("missing_format_id")
+        for fmt in attempts:
+            opts = {
+                "format": fmt,
+                "outtmpl": outtmpl,
+                "noplaylist": True,
+                "quiet": True,
+                "no_warnings": True,
+                "retries": 3,
+                "socket_timeout": 30,
+                "nocheckcertificate": True,
+                "extractor_args": extractor_args,
+            }
+            if cookiefile:
+                opts["cookiefile"] = cookiefile
 
-        download_opts = {
-            "format": format_id,
-            "outtmpl": outtmpl,
-            "noplaylist": True,
-            "quiet": True,
-            "no_warnings": True,
-            "retries": 3,
-            "socket_timeout": 30,
-            "nocheckcertificate": True,
-        }
-        if cookiefile:
-            download_opts["cookiefile"] = cookiefile
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    ydl.download([url])
+                for cand in TMP.glob(f"{prefix}.*"):
+                    if cand.is_file():
+                        return str(cand)
+            except Exception as e:
+                last_error = e
 
-        with yt_dlp.YoutubeDL(download_opts) as ydl:
-            ydl.download([url])
-
-        for cand in TMP.glob(f"{prefix}.*"):
-            if cand.is_file():
-                return str(cand)
-
-        prepared = ydl.prepare_filename(fmt) if "ydl" in locals() else ""
-        if prepared and Path(prepared).exists():
-            return prepared
-
-        raise RuntimeError("yt_dlp_download_failed")
+        raise RuntimeError(f"yt_dlp_download_failed:{last_error}")
 
     async def _resolve_source(self, chat_id: str, source_type: str, source_id: str) -> str:
         source_type = str(source_type or "").strip().lower()
         source_id = str(source_id or "").strip()
-        sid = source_id.lower()
 
-        if source_type == "url" or sid.startswith(("http://", "https://")) or "youtu.be/" in sid or "youtube.com/" in sid:
-            if not source_id.startswith(("http://", "https://")):
-                source_id = f"https://{source_id}"
-            return await self._download_url(source_id, chat_id)
+        if self._is_url(source_id):
+            return await self._download_url(source_id if source_id.startswith(("http://", "https://")) else f"https://{source_id}", chat_id)
 
-        return await self._download_telegram_file(source_id, chat_id)
+        if source_type == "url":
+            return await self._download_url(f"ytsearch1:{source_id}", chat_id)
+
+        if source_type == "file_id" and self._looks_like_file_id(source_id):
+            return await self._download_telegram_file(source_id, chat_id)
+
+        if source_id:
+            return await self._download_url(f"ytsearch1:{source_id}", chat_id)
+
+        raise RuntimeError("empty_source")
 
     async def start(self, chat_id, source_type, source_id, title="", duration=0):
         async with self.lock:
@@ -213,7 +184,6 @@ class VoicePlayer:
                 "status": "playing",
                 "position": 0,
             }
-
             last_error = None
             for _ in range(2):
                 try:
@@ -234,7 +204,6 @@ class VoicePlayer:
                         self.ready = True
                         continue
                     await asyncio.sleep(1)
-
             raise RuntimeError(f"play_failed:{last_error}")
 
     async def pause(self, chat_id):
