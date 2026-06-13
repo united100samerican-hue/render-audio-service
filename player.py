@@ -115,18 +115,17 @@ class VoicePlayer:
         extractor_args = {
             "youtube": {
                 "formats": ["missing_pot"],
-                "player_client": ["web", "web_music", "web_embedded", "tv", "default"],
+                "player_client": ["web_safari", "web_embedded", "web", "default"],
             }
         }
 
-        attempts = [
-            "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
-            "best",
+        format_candidates = [
+            "bestaudio[protocol^=m3u8]/bestaudio[protocol^=https]/bestaudio/best",
+            "bestaudio/best",
         ]
 
         last_error = None
-
-        for fmt in attempts:
+        for fmt in format_candidates:
             opts = {
                 "format": fmt,
                 "outtmpl": outtmpl,
@@ -144,6 +143,7 @@ class VoicePlayer:
             try:
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     ydl.download([url])
+
                 for cand in TMP.glob(f"{prefix}.*"):
                     if cand.is_file():
                         return str(cand)
@@ -155,6 +155,7 @@ class VoicePlayer:
     async def _resolve_source(self, chat_id: str, source_type: str, source_id: str) -> str:
         source_type = str(source_type or "").strip().lower()
         source_id = str(source_id or "").strip()
+        sid = source_id.lower()
 
         if self._is_url(source_id):
             return await self._download_url(source_id if source_id.startswith(("http://", "https://")) else f"https://{source_id}", chat_id)
