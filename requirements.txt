@@ -3,4 +3,4 @@ uvicorn[standard]
 httpx
 telethon
 py-tgcalls
-yt-dlp>=2025.12.8
+yt-dlp[default]
