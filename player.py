@@ -1,5 +1,6 @@
 import asyncio, os, uuid
 from pathlib import Path
+
 import httpx
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -17,8 +18,10 @@ class VoicePlayer:
         self.bot_token = os.getenv("BOT_TOKEN", "").strip()
         self.yt_cookies_text = os.getenv("YT_COOKIES_TEXT", "").strip()
         self.yt_cookies_file = os.getenv("YT_COOKIES_FILE", "").strip()
+
         if not self.api_id or not self.api_hash or not self.session:
             raise RuntimeError("missing_render_env")
+
         self.client = None
         self.calls = None
         self.state = {}
@@ -86,13 +89,18 @@ class VoicePlayer:
     async def _download_telegram_file(self, file_id: str, chat_id: str) -> str:
         if not self.bot_token:
             raise RuntimeError("missing_bot_token")
+
         async with httpx.AsyncClient(timeout=120) as h:
-            g = await h.get(f"https://api.telegram.org/bot{self.bot_token}/getFile", params={"file_id": file_id})
+            g = await h.get(
+                f"https://api.telegram.org/bot{self.bot_token}/getFile",
+                params={"file_id": file_id},
+            )
             g.raise_for_status()
             j = g.json()
             file_path = j["result"]["file_path"]
             ext = Path(file_path).suffix or ".mp3"
             out = TMP / f"{chat_id}_{uuid.uuid4().hex}{ext}"
+
             d = await h.get(f"https://api.telegram.org/file/bot{self.bot_token}/{file_path}")
             d.raise_for_status()
             out.write_bytes(d.content)
@@ -112,38 +120,50 @@ class VoicePlayer:
         prefix = f"{chat_id}_{uuid.uuid4().hex}"
         outtmpl = str(TMP / f"{prefix}.%(ext)s")
 
-        extractor_args = {
-            "youtube": {
-                "formats": ["missing_pot"],
-                "player_client": ["web_safari", "web_embedded", "web", "default"],
-            }
-        }
-
-        format_candidates = [
-            "bestaudio[protocol^=m3u8]/bestaudio[protocol^=https]/bestaudio/best",
-            "bestaudio/best",
+        attempts = [
+            {
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["mweb"],
+                        "formats": ["missing_pot"],
+                    }
+                },
+                "format": "bestaudio/best",
+            },
+            {
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["web_safari"],
+                        "formats": ["missing_pot"],
+                    }
+                },
+                "format": "bestaudio[protocol^=m3u8]/bestaudio/best",
+            },
         ]
 
         last_error = None
-        for fmt in format_candidates:
-            opts = {
-                "format": fmt,
-                "outtmpl": outtmpl,
-                "noplaylist": True,
-                "quiet": True,
-                "no_warnings": True,
-                "retries": 3,
-                "socket_timeout": 30,
-                "nocheckcertificate": True,
-                "extractor_args": extractor_args,
-            }
-            if cookiefile:
-                opts["cookiefile"] = cookiefile
 
-            try:
+        for attempt in attempts:
+            def _do():
+                opts = {
+                    "format": attempt["format"],
+                    "outtmpl": outtmpl,
+                    "noplaylist": True,
+                    "quiet": True,
+                    "no_warnings": True,
+                    "retries": 3,
+                    "socket_timeout": 30,
+                    "nocheckcertificate": True,
+                    "extractor_args": attempt["extractor_args"],
+                }
+                if cookiefile:
+                    opts["cookiefile"] = cookiefile
+
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     ydl.download([url])
 
+            try:
+                await asyncio.to_thread(_do)
                 for cand in TMP.glob(f"{prefix}.*"):
                     if cand.is_file():
                         return str(cand)
@@ -155,7 +175,6 @@ class VoicePlayer:
     async def _resolve_source(self, chat_id: str, source_type: str, source_id: str) -> str:
         source_type = str(source_type or "").strip().lower()
         source_id = str(source_id or "").strip()
-        sid = source_id.lower()
 
         if self._is_url(source_id):
             return await self._download_url(source_id if source_id.startswith(("http://", "https://")) else f"https://{source_id}", chat_id)
@@ -185,6 +204,7 @@ class VoicePlayer:
                 "status": "playing",
                 "position": 0,
             }
+
             last_error = None
             for _ in range(2):
                 try:
@@ -205,6 +225,7 @@ class VoicePlayer:
                         self.ready = True
                         continue
                     await asyncio.sleep(1)
+
             raise RuntimeError(f"play_failed:{last_error}")
 
     async def pause(self, chat_id):
