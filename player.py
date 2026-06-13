@@ -1,5 +1,9 @@
-import asyncio, os, uuid
+import asyncio
+import os
+import shutil
+import uuid
 from pathlib import Path
+
 import httpx
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -18,7 +22,9 @@ class VoicePlayer:
         self.bot_token = os.getenv("BOT_TOKEN", "").strip()
         self.yt_cookies_text = os.getenv("YT_COOKIES_TEXT", "").strip()
         self.yt_cookies_file = os.getenv("YT_COOKIES_FILE", "").strip()
-        self.pot_provider_url = os.getenv("POT_PROVIDER_URL", "").strip() or "http://127.0.0.1:4416"
+        self.pot_provider_url = os.getenv("POT_PROVIDER_URL", "").strip()
+        if not self.pot_provider_url:
+            self.pot_provider_url = "http://127.0.0.1:4416"
 
         if not self.api_id or not self.api_hash or not self.session:
             raise RuntimeError("missing_render_env")
@@ -41,6 +47,7 @@ class VoicePlayer:
             p = Path(self.yt_cookies_file)
             if p.exists():
                 return str(p)
+
         if self.yt_cookies_text:
             p = TMP / "yt_cookies.txt"
             try:
@@ -50,6 +57,7 @@ class VoicePlayer:
             if current != self.yt_cookies_text:
                 p.write_text(self.yt_cookies_text, encoding="utf-8")
             return str(p)
+
         return ""
 
     def _is_url(self, s):
@@ -63,6 +71,58 @@ class VoicePlayer:
         if " " in s:
             return False
         return len(s) > 20 and "/" not in s and "\\" not in s
+
+    def _find_deno(self):
+        env_path = os.getenv("DENO_PATH", "").strip()
+        if env_path and Path(env_path).exists():
+            return env_path
+
+        which = shutil.which("deno")
+        if which:
+            return which
+
+        for p in (
+            "/root/.deno/bin/deno",
+            "/home/oai/.deno/bin/deno",
+            "/usr/local/bin/deno",
+            "/usr/bin/deno",
+        ):
+            if Path(p).exists():
+                return p
+
+        return ""
+
+    def _yt_opts(self, outtmpl, extractor_args):
+        opts = {
+            "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
+            "outtmpl": outtmpl,
+            "noplaylist": True,
+            "quiet": True,
+            "verbose": True,
+            "no_warnings": True,
+            "retries": 5,
+            "fragment_retries": 5,
+            "socket_timeout": 45,
+            "nocheckcertificate": True,
+            "geo_bypass": True,
+            "ignoreerrors": False,
+            "noprogress": True,
+            "concurrent_fragment_downloads": 3,
+            "extractor_args": extractor_args,
+            "remote_components": ["ejs:github"],
+        }
+
+        deno_path = self._find_deno()
+        if deno_path:
+            opts["js_runtimes"] = {"deno": {"path": deno_path}}
+        else:
+            opts["js_runtimes"] = {"deno": {}}
+
+        cookiefile = self._cookiefile()
+        if cookiefile:
+            opts["cookiefile"] = cookiefile
+
+        return opts
 
     async def boot(self):
         if self.ready and self.calls_started:
@@ -90,8 +150,12 @@ class VoicePlayer:
     async def _download_telegram_file(self, file_id: str, chat_id: str) -> str:
         if not self.bot_token:
             raise RuntimeError("missing_bot_token")
+
         async with httpx.AsyncClient(timeout=120) as h:
-            g = await h.get(f"https://api.telegram.org/bot{self.bot_token}/getFile", params={"file_id": file_id})
+            g = await h.get(
+                f"https://api.telegram.org/bot{self.bot_token}/getFile",
+                params={"file_id": file_id},
+            )
             g.raise_for_status()
             j = g.json()
             file_path = j["result"]["file_path"]
@@ -112,66 +176,36 @@ class VoicePlayer:
         if not url:
             raise RuntimeError("empty_url")
 
-        cookiefile = self._cookiefile()
         prefix = f"{chat_id}_{uuid.uuid4().hex}"
         outtmpl = str(TMP / f"{prefix}.%(ext)s")
 
-        # قائمة المحاولات بترتيب الأولوية
-        # android_vr: أفضل خيار - لا يحتاج JS runtime ويوفر صيغ صوتية حقيقية
-        # tv: خيار احتياطي - يعمل بدون JS runtime في معظم الحالات
-        # web: خيار أخير - قد يحتاج JS runtime
         attempts = [
             {
                 "extractor_args": {
                     "youtube": {
-                        "player_client": ["android_vr"],
-                        "player_skip": ["webpage", "configs", "js"],
-                    },
+                        "player_client": ["mweb", "web_safari"],
+                        "formats": ["missing_pot"],
+                    }
                 },
-                "format": "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best[ext=mp4]/best",
+                "format": "bestaudio[protocol^=m3u8]/bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
             },
             {
                 "extractor_args": {
                     "youtube": {
-                        "player_client": ["tv"],
-                        "player_skip": ["webpage", "configs", "js"],
-                    },
+                        "player_client": ["web_safari", "mweb"],
+                        "formats": ["missing_pot"],
+                    }
                 },
-                "format": "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
-            },
-            {
-                "extractor_args": {
-                    "youtube": {
-                        "player_client": ["web_safari"],
-                        "player_skip": ["webpage", "configs", "js"],
-                    },
-                },
-                "format": "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
+                "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
             },
         ]
 
         last_error = None
 
-        for idx, attempt in enumerate(attempts):
+        for idx, attempt in enumerate(attempts, start=1):
             def _do():
-                opts = {
-                    "format": attempt["format"],
-                    "outtmpl": outtmpl,
-                    "noplaylist": True,
-                    "quiet": True,
-                    "no_warnings": True,
-                    "retries": 5,
-                    "fragment_retries": 5,
-                    "socket_timeout": 45,
-                    "nocheckcertificate": True,
-                    "extractor_args": attempt["extractor_args"],
-                    "geo_bypass": True,
-                    "ignoreerrors": False,
-                    "noprogress": True,
-                    "concurrent_fragment_downloads": 3,
-                }
-                if cookiefile:
-                    opts["cookiefile"] = cookiefile
+                opts = self._yt_opts(outtmpl, attempt["extractor_args"])
+                opts["format"] = attempt["format"]
 
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(url, download=True)
@@ -179,22 +213,15 @@ class VoicePlayer:
                         raise RuntimeError("extract_info returned None")
 
             try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(_do),
-                    timeout=120
-                )
+                await asyncio.wait_for(asyncio.to_thread(_do), timeout=150)
                 for cand in TMP.glob(f"{prefix}.*"):
                     if cand.is_file() and cand.stat().st_size > 1024:
                         return str(cand)
-            except asyncio.TimeoutError:
-                last_error = Exception(f"attempt_{idx+1}_timeout")
             except Exception as e:
                 last_error = e
-                # إذا كان الخطأ يتعلق بعدم توفر الصيغ، جرب المحاولة التالية
-                if "format" in str(e).lower() or "requested format" in str(e).lower():
-                    continue
-                # إذا كان الخطأ يتعلق بـ n-challenge، جرب المحاولة التالية
-                if "n challenge" in str(e).lower() or "n parameter" in str(e).lower():
+                msg = str(e).lower()
+                print(f"yt_dlp_attempt_{idx}_error", msg)
+                if "requested format" in msg or "page needs to be reloaded" in msg or "failed to extract any player response" in msg:
                     continue
 
         raise RuntimeError(f"yt_dlp_download_failed:{last_error}")
@@ -204,7 +231,9 @@ class VoicePlayer:
         source_id = str(source_id or "").strip()
 
         if self._is_url(source_id):
-            return await self._download_url(source_id if source_id.startswith(("http://", "https://")) else f"https://{source_id}", chat_id)
+            if not source_id.startswith(("http://", "https://")):
+                source_id = f"https://{source_id}"
+            return await self._download_url(source_id, chat_id)
 
         if source_type == "url":
             return await self._download_url(f"ytsearch1:{source_id}", chat_id)
@@ -222,6 +251,7 @@ class VoicePlayer:
             await self.boot()
             chat_id = str(chat_id)
             source_path = await self._resolve_source(chat_id, source_type, source_id)
+
             self.state[chat_id] = {
                 "source_type": str(source_type),
                 "source_id": str(source_id),
@@ -231,6 +261,7 @@ class VoicePlayer:
                 "status": "playing",
                 "position": 0,
             }
+
             last_error = None
             for _ in range(2):
                 try:
