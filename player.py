@@ -1,6 +1,5 @@
 import asyncio, os, uuid
 from pathlib import Path
-
 import httpx
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -96,6 +95,35 @@ class VoicePlayer:
             out.write_bytes(d.content)
             return str(out)
 
+    def _score_format(self, f):
+        ext = str(f.get("ext") or "").lower()
+        abr = float(f.get("abr") or 0)
+        tbr = float(f.get("tbr") or 0)
+        size = float(f.get("filesize") or f.get("filesize_approx") or 0)
+
+        ext_bonus = 0
+        if ext == "m4a":
+            ext_bonus = 3
+        elif ext in ("mp4", "webm", "ogg", "opus"):
+            ext_bonus = 2
+        elif ext:
+            ext_bonus = 1
+
+        audio_only = 1 if str(f.get("vcodec") or "").lower() == "none" and str(f.get("acodec") or "").lower() != "none" else 0
+        has_url = 1 if f.get("url") else 0
+
+        return (has_url, audio_only, ext_bonus, abr, tbr, size)
+
+    def _pick_format(self, info):
+        fmts = info.get("formats") or []
+        usable = [f for f in fmts if f.get("url") and str(f.get("acodec") or "").lower() != "none"]
+        if not usable:
+            usable = [f for f in fmts if f.get("url")]
+        if not usable:
+            return None
+        usable.sort(key=self._score_format, reverse=True)
+        return usable[0]
+
     async def _download_url(self, url: str, chat_id: str) -> str:
         try:
             import yt_dlp
@@ -110,39 +138,54 @@ class VoicePlayer:
         prefix = f"{chat_id}_{uuid.uuid4().hex}"
         outtmpl = str(TMP / f"{prefix}.%(ext)s")
 
-        format_candidates = [
-            "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio[ext=webm]/bestaudio/best",
-            "bestaudio/best",
-            "251/250/249/140/139/best",
-        ]
+        info_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "skip_download": True,
+            "retries": 3,
+            "socket_timeout": 30,
+            "nocheckcertificate": True,
+        }
+        if cookiefile:
+            info_opts["cookiefile"] = cookiefile
 
-        last_error = None
+        with yt_dlp.YoutubeDL(info_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
 
-        for fmt in format_candidates:
-            opts = {
-                "format": fmt,
-                "outtmpl": outtmpl,
-                "noplaylist": True,
-                "quiet": True,
-                "no_warnings": True,
-                "retries": 3,
-                "socket_timeout": 30,
-                "nocheckcertificate": True,
-            }
-            if cookiefile:
-                opts["cookiefile"] = cookiefile
+        fmt = self._pick_format(info)
+        if not fmt:
+            raise RuntimeError("no_usable_audio_format")
 
-            try:
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    fn = ydl.prepare_filename(info)
-                    p = Path(fn)
-                    if p.exists():
-                        return str(p)
-            except Exception as e:
-                last_error = e
+        format_id = str(fmt.get("format_id") or "").strip()
+        if not format_id:
+            raise RuntimeError("missing_format_id")
 
-        raise RuntimeError(f"yt_dlp_download_failed:{last_error}")
+        download_opts = {
+            "format": format_id,
+            "outtmpl": outtmpl,
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+            "retries": 3,
+            "socket_timeout": 30,
+            "nocheckcertificate": True,
+        }
+        if cookiefile:
+            download_opts["cookiefile"] = cookiefile
+
+        with yt_dlp.YoutubeDL(download_opts) as ydl:
+            ydl.download([url])
+
+        for cand in TMP.glob(f"{prefix}.*"):
+            if cand.is_file():
+                return str(cand)
+
+        prepared = ydl.prepare_filename(fmt) if "ydl" in locals() else ""
+        if prepared and Path(prepared).exists():
+            return prepared
+
+        raise RuntimeError("yt_dlp_download_failed")
 
     async def _resolve_source(self, chat_id: str, source_type: str, source_id: str) -> str:
         source_type = str(source_type or "").strip().lower()
@@ -161,7 +204,6 @@ class VoicePlayer:
             await self.boot()
             chat_id = str(chat_id)
             source_path = await self._resolve_source(chat_id, source_type, source_id)
-
             self.state[chat_id] = {
                 "source_type": str(source_type),
                 "source_id": str(source_id),
