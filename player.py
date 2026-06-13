@@ -22,9 +22,6 @@ class VoicePlayer:
         self.bot_token = os.getenv("BOT_TOKEN", "").strip()
         self.yt_cookies_text = os.getenv("YT_COOKIES_TEXT", "").strip()
         self.yt_cookies_file = os.getenv("YT_COOKIES_FILE", "").strip()
-        self.pot_provider_url = os.getenv("POT_PROVIDER_URL", "").strip()
-        if not self.pot_provider_url:
-            self.pot_provider_url = "http://127.0.0.1:4416"
 
         if not self.api_id or not self.api_hash or not self.session:
             raise RuntimeError("missing_render_env")
@@ -60,6 +57,25 @@ class VoicePlayer:
 
         return ""
 
+    def _find_deno(self):
+        deno_env = os.getenv("DENO_PATH", "").strip()
+        if deno_env and Path(deno_env).exists():
+            return deno_env
+
+        found = shutil.which("deno")
+        if found:
+            return found
+
+        for p in (
+            "/root/.deno/bin/deno",
+            "/home/oai/.deno/bin/deno",
+            "/usr/local/bin/deno",
+            "/usr/bin/deno",
+        ):
+            if Path(p).exists():
+                return p
+        return ""
+
     def _is_url(self, s):
         s = str(s or "").strip().lower()
         return s.startswith(("http://", "https://")) or "youtu.be/" in s or "youtube.com/" in s or "music.youtube.com/" in s
@@ -71,26 +87,6 @@ class VoicePlayer:
         if " " in s:
             return False
         return len(s) > 20 and "/" not in s and "\\" not in s
-
-    def _find_deno(self):
-        env_path = os.getenv("DENO_PATH", "").strip()
-        if env_path and Path(env_path).exists():
-            return env_path
-
-        which = shutil.which("deno")
-        if which:
-            return which
-
-        for p in (
-            "/root/.deno/bin/deno",
-            "/home/oai/.deno/bin/deno",
-            "/usr/local/bin/deno",
-            "/usr/bin/deno",
-        ):
-            if Path(p).exists():
-                return p
-
-        return ""
 
     def _yt_opts(self, outtmpl, extractor_args):
         opts = {
@@ -110,13 +106,12 @@ class VoicePlayer:
             "concurrent_fragment_downloads": 3,
             "extractor_args": extractor_args,
             "remote_components": ["ejs:github"],
+            "js_runtimes": {"deno": {}},
         }
 
         deno_path = self._find_deno()
         if deno_path:
             opts["js_runtimes"] = {"deno": {"path": deno_path}}
-        else:
-            opts["js_runtimes"] = {"deno": {}}
 
         cookiefile = self._cookiefile()
         if cookiefile:
@@ -206,7 +201,6 @@ class VoicePlayer:
             def _do():
                 opts = self._yt_opts(outtmpl, attempt["extractor_args"])
                 opts["format"] = attempt["format"]
-
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(url, download=True)
                     if info is None:
@@ -221,7 +215,11 @@ class VoicePlayer:
                 last_error = e
                 msg = str(e).lower()
                 print(f"yt_dlp_attempt_{idx}_error", msg)
-                if "requested format" in msg or "page needs to be reloaded" in msg or "failed to extract any player response" in msg:
+                if (
+                    "requested format" in msg
+                    or "page needs to be reloaded" in msg
+                    or "failed to extract any player response" in msg
+                ):
                     continue
 
         raise RuntimeError(f"yt_dlp_download_failed:{last_error}")
@@ -251,7 +249,6 @@ class VoicePlayer:
             await self.boot()
             chat_id = str(chat_id)
             source_path = await self._resolve_source(chat_id, source_type, source_id)
-
             self.state[chat_id] = {
                 "source_type": str(source_type),
                 "source_id": str(source_id),
@@ -261,7 +258,6 @@ class VoicePlayer:
                 "status": "playing",
                 "position": 0,
             }
-
             last_error = None
             for _ in range(2):
                 try:
