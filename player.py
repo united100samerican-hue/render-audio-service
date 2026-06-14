@@ -22,6 +22,7 @@ class VoicePlayer:
         self.bot_token = os.getenv("BOT_TOKEN", "").strip()
         self.yt_cookies_text = os.getenv("YT_COOKIES_TEXT", "").strip()
         self.yt_cookies_file = os.getenv("YT_COOKIES_FILE", "").strip()
+        self.pot_provider_url = os.getenv("POT_PROVIDER_URL", "").strip() or "http://127.0.0.1:4416"
 
         if not self.api_id or not self.api_hash or not self.session:
             raise RuntimeError("missing_render_env")
@@ -180,7 +181,10 @@ class VoicePlayer:
                     "youtube": {
                         "player_client": ["mweb", "web_safari"],
                         "formats": ["missing_pot"],
-                    }
+                    },
+                    "youtubepot-bgutilhttp": {
+                        "base_url": [self.pot_provider_url],
+                    },
                 },
                 "format": "bestaudio[protocol^=m3u8]/bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
             },
@@ -189,7 +193,10 @@ class VoicePlayer:
                     "youtube": {
                         "player_client": ["web_safari", "mweb"],
                         "formats": ["missing_pot"],
-                    }
+                    },
+                    "youtubepot-bgutilhttp": {
+                        "base_url": [self.pot_provider_url],
+                    },
                 },
                 "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
             },
