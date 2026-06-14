@@ -120,6 +120,40 @@ class VoicePlayer:
 
         return opts
 
+    def _meta_from_info(self, info, fallback_url=""):
+        if not isinstance(info, dict):
+            return {}
+
+        entry = info
+        entries = info.get("entries")
+        if entries:
+            try:
+                first = next((e for e in entries if isinstance(e, dict)), None)
+            except TypeError:
+                first = None
+            if first:
+                entry = first
+
+        video_id = str(entry.get("id") or "").strip()
+        webpage_url = str(entry.get("webpage_url") or entry.get("original_url") or fallback_url or "").strip()
+        title = str(entry.get("title") or "").strip()
+        duration = int(entry.get("duration") or 0)
+        thumbnail = str(entry.get("thumbnail") or "").strip()
+
+        if not webpage_url and video_id:
+            webpage_url = f"https://www.youtube.com/watch?v={video_id}"
+
+        if not thumbnail and video_id:
+            thumbnail = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+
+        return {
+            "video_id": video_id,
+            "webpage_url": webpage_url,
+            "title": title,
+            "duration": duration,
+            "thumbnail": thumbnail,
+        }
+
     async def boot(self):
         if self.ready and self.calls_started:
             return
@@ -143,7 +177,7 @@ class VoicePlayer:
         res = fn(*args, **kwargs)
         return await res if asyncio.iscoroutine(res) else res
 
-    async def _download_telegram_file(self, file_id: str, chat_id: str) -> str:
+    async def _download_telegram_file(self, file_id: str, chat_id: str):
         if not self.bot_token:
             raise RuntimeError("missing_bot_token")
 
@@ -160,9 +194,9 @@ class VoicePlayer:
             d = await h.get(f"https://api.telegram.org/file/bot{self.bot_token}/{file_path}")
             d.raise_for_status()
             out.write_bytes(d.content)
-            return str(out)
+            return str(out), {}
 
-    async def _download_url(self, url: str, chat_id: str) -> str:
+    async def _download_url(self, url: str, chat_id: str):
         try:
             import yt_dlp
         except Exception as e:
@@ -203,6 +237,7 @@ class VoicePlayer:
         ]
 
         last_error = None
+        last_meta = {}
 
         for idx, attempt in enumerate(attempts, start=1):
             def _do():
@@ -212,12 +247,15 @@ class VoicePlayer:
                     info = ydl.extract_info(url, download=True)
                     if info is None:
                         raise RuntimeError("extract_info returned None")
+                    return info
 
             try:
-                await asyncio.wait_for(asyncio.to_thread(_do), timeout=150)
+                info = await asyncio.wait_for(asyncio.to_thread(_do), timeout=150)
+                last_meta = self._meta_from_info(info, url)
+
                 for cand in TMP.glob(f"{prefix}.*"):
                     if cand.is_file() and cand.stat().st_size > 1024:
-                        return str(cand)
+                        return str(cand), last_meta
             except Exception as e:
                 last_error = e
                 msg = str(e).lower()
@@ -226,12 +264,14 @@ class VoicePlayer:
                     "requested format" in msg
                     or "page needs to be reloaded" in msg
                     or "failed to extract any player response" in msg
+                    or "sign in to confirm" in msg
+                    or "not available" in msg
                 ):
                     continue
 
         raise RuntimeError(f"yt_dlp_download_failed:{last_error}")
 
-    async def _resolve_source(self, chat_id: str, source_type: str, source_id: str) -> str:
+    async def _resolve_source(self, chat_id: str, source_type: str, source_id: str):
         source_type = str(source_type or "").strip().lower()
         source_id = str(source_id or "").strip()
 
@@ -255,16 +295,29 @@ class VoicePlayer:
         async with self.lock:
             await self.boot()
             chat_id = str(chat_id)
-            source_path = await self._resolve_source(chat_id, source_type, source_id)
+            source_path, source_meta = await self._resolve_source(chat_id, source_type, source_id)
+
+            stype = str(source_type or "").strip()
+            sid = str(source_id or "").strip()
+            resolved_title = str(title or source_meta.get("title") or "")
+            resolved_duration = int(duration or source_meta.get("duration") or 0)
+
+            if stype == "url" and source_meta.get("webpage_url"):
+                sid = str(source_meta["webpage_url"]).strip() or sid
+
             self.state[chat_id] = {
-                "source_type": str(source_type),
-                "source_id": str(source_id),
-                "title": str(title or ""),
-                "duration": int(duration or 0),
+                "source_type": stype,
+                "source_id": sid,
+                "title": resolved_title,
+                "duration": resolved_duration,
                 "path": source_path,
                 "status": "playing",
                 "position": 0,
+                "webpage_url": source_meta.get("webpage_url", ""),
+                "thumbnail": source_meta.get("thumbnail", ""),
+                "video_id": source_meta.get("video_id", ""),
             }
+
             last_error = None
             for _ in range(2):
                 try:
