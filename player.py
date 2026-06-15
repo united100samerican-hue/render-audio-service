@@ -196,6 +196,69 @@ class VoicePlayer:
             out.write_bytes(d.content)
             return str(out), {}
 
+    async def meta(self, chat_id, source_type, source_id, title="", duration=0):
+        source_type = str(source_type or "").strip().lower()
+        source_id = str(source_id or "").strip()
+        title = str(title or "").strip()
+        duration = int(duration or 0)
+
+        if source_type in {"voice", "audio", "document", "file_id"} or self._looks_like_file_id(source_id):
+            return {
+                "ok": True,
+                "state": {
+                    "source_type": source_type or "file_id",
+                    "source_id": source_id,
+                    "title": title,
+                    "duration": duration,
+                    "video_id": "",
+                    "webpage_url": "",
+                    "thumbnail": "",
+                },
+            }
+
+        if self._is_url(source_id):
+            if not source_id.startswith(("http://", "https://")):
+                source_id = f"https://{source_id}"
+            url = source_id
+        elif source_id:
+            url = f"ytsearch1:{source_id}"
+        else:
+            raise RuntimeError("empty_source")
+
+        try:
+            import yt_dlp
+        except Exception as e:
+            raise RuntimeError(f"missing_yt_dlp:{e}")
+
+        def _do():
+            opts = self._yt_opts(
+                str(TMP / f"meta_{uuid.uuid4().hex}.%(ext)s"),
+                {
+                    "youtube": {
+                        "player_client": ["mweb", "web_safari"],
+                        "formats": ["missing_pot"],
+                    },
+                    "youtubepot-bgutilhttp": {
+                        "base_url": [self.pot_provider_url],
+                    },
+                },
+            )
+            opts["skip_download"] = True
+            opts["quiet"] = True
+            opts["verbose"] = False
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return ydl.extract_info(url, download=False)
+
+        info = await asyncio.wait_for(asyncio.to_thread(_do), timeout=60)
+        meta = self._meta_from_info(info, source_id)
+        meta["source_type"] = "url"
+        meta["source_id"] = source_id
+        if title and not meta.get("title"):
+            meta["title"] = title
+        if duration and not meta.get("duration"):
+            meta["duration"] = duration
+        return {"ok": True, "state": meta}
+
     async def _download_url(self, url: str, chat_id: str):
         try:
             import yt_dlp
