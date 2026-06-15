@@ -23,6 +23,23 @@ async def ping(x_keepalive_secret: str | None = Header(default=None)):
     return {"ok": True}
 
 
+@app.post("/meta")
+async def meta(req: Request, x_keepalive_secret: str | None = Header(default=None)):
+    guard(x_keepalive_secret)
+    body = await req.json()
+    try:
+        state = await player.meta(
+            body["chatId"],
+            body["source_type"],
+            body["source_id"],
+            body.get("title", ""),
+            body.get("duration", 0),
+        )
+        return {"ok": True, "action": "meta", "state": state.get("state", {})}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @app.post("/start")
 async def start(req: Request, x_keepalive_secret: str | None = Header(default=None)):
     guard(x_keepalive_secret)
