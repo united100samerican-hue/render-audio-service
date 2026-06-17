@@ -2,7 +2,7 @@ import os
 from fastapi import FastAPI, Header, HTTPException, Request
 from player import VoicePlayer
 
-app = FastAPI()
+app = FastAPI(title="Render Audio Service", version="2.0")
 player = VoicePlayer()
 SECRET = os.getenv("KEEPALIVE_SECRET", "").strip()
 
@@ -12,9 +12,16 @@ def guard(v: str | None):
         raise HTTPException(status_code=403, detail="forbidden")
 
 
+async def _body(req: Request):
+    try:
+        return await req.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid_json")
+
+
 @app.get("/")
 async def root():
-    return {"ok": True}
+    return {"ok": True, "service": "render-audio-service"}
 
 
 @app.get("/ping")
@@ -23,10 +30,15 @@ async def ping(x_keepalive_secret: str | None = Header(default=None)):
     return {"ok": True}
 
 
+@app.get("/healthz")
+async def healthz():
+    return {"ok": True, "ready": True}
+
+
 @app.post("/meta")
 async def meta(req: Request, x_keepalive_secret: str | None = Header(default=None)):
     guard(x_keepalive_secret)
-    body = await req.json()
+    body = await _body(req)
     try:
         state = await player.meta(
             body["chatId"],
@@ -43,7 +55,7 @@ async def meta(req: Request, x_keepalive_secret: str | None = Header(default=Non
 @app.post("/start")
 async def start(req: Request, x_keepalive_secret: str | None = Header(default=None)):
     guard(x_keepalive_secret)
-    body = await req.json()
+    body = await _body(req)
     try:
         state = await player.start(
             body["chatId"],
@@ -60,7 +72,7 @@ async def start(req: Request, x_keepalive_secret: str | None = Header(default=No
 @app.post("/pause")
 async def pause(req: Request, x_keepalive_secret: str | None = Header(default=None)):
     guard(x_keepalive_secret)
-    body = await req.json()
+    body = await _body(req)
     try:
         state = await player.pause(body["chatId"])
         return {"ok": True, "action": "pause", "state": state}
@@ -71,7 +83,7 @@ async def pause(req: Request, x_keepalive_secret: str | None = Header(default=No
 @app.post("/resume")
 async def resume(req: Request, x_keepalive_secret: str | None = Header(default=None)):
     guard(x_keepalive_secret)
-    body = await req.json()
+    body = await _body(req)
     try:
         state = await player.resume(body["chatId"])
         return {"ok": True, "action": "resume", "state": state}
@@ -82,7 +94,7 @@ async def resume(req: Request, x_keepalive_secret: str | None = Header(default=N
 @app.post("/stop")
 async def stop(req: Request, x_keepalive_secret: str | None = Header(default=None)):
     guard(x_keepalive_secret)
-    body = await req.json()
+    body = await _body(req)
     try:
         state = await player.stop(body["chatId"])
         return {"ok": True, "action": "stop", "state": state}
@@ -93,7 +105,7 @@ async def stop(req: Request, x_keepalive_secret: str | None = Header(default=Non
 @app.post("/seek")
 async def seek(req: Request, x_keepalive_secret: str | None = Header(default=None)):
     guard(x_keepalive_secret)
-    body = await req.json()
+    body = await _body(req)
     try:
         state = await player.seek(body["chatId"], body.get("delta", 0))
         return {"ok": True, "action": "seek", "state": state}
