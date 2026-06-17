@@ -3,6 +3,7 @@ import os
 import shutil
 import uuid
 from pathlib import Path
+from typing import Any
 
 import httpx
 from telethon import TelegramClient
@@ -62,11 +63,9 @@ class VoicePlayer:
         deno_env = os.getenv("DENO_PATH", "").strip()
         if deno_env and Path(deno_env).exists():
             return deno_env
-
         found = shutil.which("deno")
         if found:
             return found
-
         for p in (
             "/root/.deno/bin/deno",
             "/home/oai/.deno/bin/deno",
@@ -139,6 +138,8 @@ class VoicePlayer:
         title = str(entry.get("title") or "").strip()
         duration = int(entry.get("duration") or 0)
         thumbnail = str(entry.get("thumbnail") or "").strip()
+        is_live = bool(entry.get("is_live") or entry.get("live_status") in {"is_live", "is_upcoming"})
+        direct_url = str(entry.get("url") or "").strip()
 
         if not webpage_url and video_id:
             webpage_url = f"https://www.youtube.com/watch?v={video_id}"
@@ -152,6 +153,8 @@ class VoicePlayer:
             "title": title,
             "duration": duration,
             "thumbnail": thumbnail,
+            "is_live": is_live,
+            "direct_url": direct_url,
         }
 
     async def boot(self):
@@ -196,6 +199,44 @@ class VoicePlayer:
             out.write_bytes(d.content)
             return str(out), {}
 
+    async def _probe_url(self, source_id: str):
+        try:
+            import yt_dlp
+        except Exception as e:
+            raise RuntimeError(f"missing_yt_dlp:{e}")
+
+        if self._is_url(source_id):
+            if not source_id.startswith(("http://", "https://")):
+                source_id = f"https://{source_id}"
+            url = source_id
+        else:
+            url = f"ytsearch1:{source_id}"
+
+        def _do():
+            opts = self._yt_opts(
+                str(TMP / f"probe_{uuid.uuid4().hex}.%(ext)s"),
+                {
+                    "youtube": {
+                        "player_client": ["mweb", "web_safari", "android"],
+                        "formats": ["missing_pot"],
+                    },
+                    "youtubepot-bgutilhttp": {
+                        "base_url": [self.pot_provider_url],
+                    },
+                },
+            )
+            opts["skip_download"] = True
+            opts["quiet"] = True
+            opts["verbose"] = False
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return ydl.extract_info(url, download=False)
+
+        info = await asyncio.wait_for(asyncio.to_thread(_do), timeout=35)
+        meta = self._meta_from_info(info, source_id)
+        meta["source_type"] = "url"
+        meta["source_id"] = source_id
+        return meta
+
     async def meta(self, chat_id, source_type, source_id, title="", duration=0):
         source_type = str(source_type or "").strip().lower()
         source_id = str(source_id or "").strip()
@@ -213,46 +254,12 @@ class VoicePlayer:
                     "video_id": "",
                     "webpage_url": "",
                     "thumbnail": "",
+                    "is_live": False,
+                    "direct_url": "",
                 },
             }
 
-        if self._is_url(source_id):
-            if not source_id.startswith(("http://", "https://")):
-                source_id = f"https://{source_id}"
-            url = source_id
-        elif source_id:
-            url = f"ytsearch1:{source_id}"
-        else:
-            raise RuntimeError("empty_source")
-
-        try:
-            import yt_dlp
-        except Exception as e:
-            raise RuntimeError(f"missing_yt_dlp:{e}")
-
-        def _do():
-            opts = self._yt_opts(
-                str(TMP / f"meta_{uuid.uuid4().hex}.%(ext)s"),
-                {
-                    "youtube": {
-                        "player_client": ["mweb", "web_safari"],
-                        "formats": ["missing_pot"],
-                    },
-                    "youtubepot-bgutilhttp": {
-                        "base_url": [self.pot_provider_url],
-                    },
-                },
-            )
-            opts["skip_download"] = True
-            opts["quiet"] = True
-            opts["verbose"] = False
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                return ydl.extract_info(url, download=False)
-
-        info = await asyncio.wait_for(asyncio.to_thread(_do), timeout=60)
-        meta = self._meta_from_info(info, source_id)
-        meta["source_type"] = "url"
-        meta["source_id"] = source_id
+        meta = await self._probe_url(source_id)
         if title and not meta.get("title"):
             meta["title"] = title
         if duration and not meta.get("duration"):
@@ -276,7 +283,7 @@ class VoicePlayer:
             {
                 "extractor_args": {
                     "youtube": {
-                        "player_client": ["mweb", "web_safari"],
+                        "player_client": ["mweb", "web_safari", "android"],
                         "formats": ["missing_pot"],
                     },
                     "youtubepot-bgutilhttp": {
@@ -288,7 +295,7 @@ class VoicePlayer:
             {
                 "extractor_args": {
                     "youtube": {
-                        "player_client": ["web_safari", "mweb"],
+                        "player_client": ["web_safari", "mweb", "android"],
                         "formats": ["missing_pot"],
                     },
                     "youtubepot-bgutilhttp": {
@@ -379,6 +386,8 @@ class VoicePlayer:
                 "webpage_url": source_meta.get("webpage_url", ""),
                 "thumbnail": source_meta.get("thumbnail", ""),
                 "video_id": source_meta.get("video_id", ""),
+                "direct_url": source_meta.get("direct_url", ""),
+                "is_live": bool(source_meta.get("is_live", False)),
             }
 
             last_error = None
