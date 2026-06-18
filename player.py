@@ -246,7 +246,8 @@ class VoicePlayer:
             meta["title"] = source_id
         if duration and not meta.get("duration"):
             meta["duration"] = duration
-        return {"ok": True, "state": meta}async def _download_url(self, url: str, chat_id: str):
+        return {"ok": True, "state": meta}
+    async def _download_url(self, url: str, chat_id: str):
         try:
             import yt_dlp
         except Exception as e:
