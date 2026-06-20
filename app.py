@@ -1,9 +1,11 @@
 import os
 from fastapi import FastAPI, Header, HTTPException, Request
 from player import VoicePlayer
+from tiktok_service import TikTokService
 
 app = FastAPI(title="Render Audio Service", version="2.0")
 player = VoicePlayer()
+tiktok_service = TikTokService()
 SECRET = os.getenv("KEEPALIVE_SECRET", "").strip()
 
 
@@ -111,3 +113,24 @@ async def seek(req: Request, x_keepalive_secret: str | None = Header(default=Non
         return {"ok": True, "action": "seek", "state": state}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+# ===================== TikTok Routes (مستقلة) =====================
+@app.post("/tiktok/start")
+async def tiktok_start(body: dict = Body(...)):
+    chat_id = int(body.get("chatId"))
+    url = body.get("source_url")
+    video = body.get("video", True)
+    result = await tiktok_service.start(chat_id, url, video)
+    return result
+
+@app.post("/tiktok/stop")
+async def tiktok_stop(body: dict = Body(...)):
+    chat_id = int(body.get("chatId"))
+    result = await tiktok_service.stop(chat_id)
+    return result
+
+@app.post("/tiktok/state")
+async def tiktok_state(body: dict = Body(...)):
+    chat_id = int(body.get("chatId"))
+    result = await tiktok_service.get_state(chat_id)
+    return {"ok": True, "state": result}
+# ================================================================
