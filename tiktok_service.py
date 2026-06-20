@@ -1,8 +1,13 @@
+# tiktok_service.py
+# خدمة مستقلة تماماً لبث تيك توك (لا تعتمد على player.py)
 
 import asyncio
+import os
 import logging
 from typing import Optional, Dict, Any
 
+from telethon import TelegramClient
+from telethon.sessions import StringSession
 from TikTokLive import TikTokLiveClient
 from TikTokLive.events import ConnectEvent, DisconnectEvent, ViewerCountUpdateEvent
 from pytgcalls import PyTgCalls
@@ -10,6 +15,7 @@ from pytgcalls.types import AudioVideoPiped, AudioPiped, StreamType
 import yt_dlp
 
 logger = logging.getLogger("tiktok_service")
+
 
 class TikTokSession:
     def __init__(self, chat_id: int):
@@ -23,19 +29,51 @@ class TikTokSession:
 
 
 class TikTokService:
-    def __init__(self, pytgcalls: PyTgCalls, telethon_client):
-        self.pytgcalls = pytgcalls
-        self.telethon = telethon_client
+    def __init__(self):
+        self.api_id = int(os.getenv("API_ID", "0"))
+        self.api_hash = os.getenv("API_HASH", "").strip()
+        self.session_string = os.getenv("SESSION_STRING", "").strip()
+
+        if not self.api_id or not self.api_hash or not self.session_string:
+            raise RuntimeError("missing_tiktok_env")
+
+        self.client: Optional[TelegramClient] = None
+        self.pytgcalls: Optional[PyTgCalls] = None
         self.sessions: Dict[int, TikTokSession] = {}
+        self._boot_lock = asyncio.Lock()
+        self._ready = False
+
+    async def boot(self):
+        if self._ready:
+            return
+        async with self._boot_lock:
+            if self._ready:
+                return
+
+            self.client = TelegramClient(
+                StringSession(self.session_string),
+                self.api_id,
+                self.api_hash
+            )
+            if not self.client.is_connected():
+                await self.client.start()
+
+            self.pytgcalls = PyTgCalls(self.client)
+            await self.pytgcalls.start()
+
+            self._ready = True
+            logger.info("TikTokService booted successfully")
 
     async def start(self, chat_id: int, tiktok_url: str, video: bool = True) -> Dict[str, Any]:
+        await self.boot()
+
         session = self.sessions.get(chat_id) or TikTokSession(chat_id)
         self.sessions[chat_id] = session
 
         try:
             stream_url = await self._get_stream_url(tiktok_url)
             if not stream_url:
-                return {"ok": False, "error": "تعذر استخراج رابط البث من تيك توك"}
+                return {"ok": False, "error": "تعذر استخراج رابط البث"}
 
             unique_id = self._extract_unique_id(tiktok_url)
             if unique_id:
@@ -48,7 +86,7 @@ class TikTokService:
             await self.pytgcalls.join_group_call(chat_id, piped)
 
             session.is_active = True
-            session.title = f"TikTok Live"
+            session.title = "TikTok Live"
             session.username = unique_id or "unknown"
 
             if session.task:
@@ -84,7 +122,6 @@ class TikTokService:
 
             session.is_active = False
             session.viewers = 0
-
             return {"ok": True, "state": {"status": "idle"}}
         except Exception as e:
             return {"ok": False, "error": str(e)}
