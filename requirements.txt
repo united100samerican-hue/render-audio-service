@@ -5,3 +5,4 @@ telethon
 py-tgcalls
 yt-dlp[default]
 bgutil-ytdlp-pot-provider
+TikTokLive
