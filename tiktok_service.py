@@ -1,17 +1,25 @@
-# tiktok_service.py
-# خدمة مستقلة تماماً لبث تيك توك (لا تعتمد على player.py)
+
 
 import asyncio
-import os
 import logging
-from typing import Optional, Dict, Any
+import os
+from typing import Any, Dict, Optional
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from TikTokLive import TikTokLiveClient
 from TikTokLive.events import ConnectEvent, DisconnectEvent, RoomUserSeqEvent
 from pytgcalls import PyTgCalls
-from pytgcalls.types.input_stream import AudioPiped, AudioVideoPiped, StreamType
+try:
+    from pytgcalls import StreamType
+except Exception:  # pragma: no cover
+    StreamType = None
+
+try:
+    from pytgcalls.types.input_stream import AudioPiped, AudioVideoPiped
+except Exception:  # pragma: no cover
+    from pytgcalls.types import AudioPiped, AudioVideoPiped
+
 import yt_dlp
 
 logger = logging.getLogger("tiktok_service")
@@ -46,6 +54,7 @@ class TikTokService:
     async def boot(self):
         if self._ready:
             return
+
         async with self._boot_lock:
             if self._ready:
                 return
@@ -53,14 +62,14 @@ class TikTokService:
             self.client = TelegramClient(
                 StringSession(self.session_string),
                 self.api_id,
-                self.api_hash
+                self.api_hash,
             )
+
             if not self.client.is_connected():
                 await self.client.start()
 
             self.pytgcalls = PyTgCalls(self.client)
             await self.pytgcalls.start()
-
             self._ready = True
             logger.info("TikTokService booted successfully")
 
@@ -76,14 +85,23 @@ class TikTokService:
                 return {"ok": False, "error": "تعذر استخراج رابط البث"}
 
             unique_id = self._extract_unique_id(tiktok_url)
-            if unique_id:
-                session.client = TikTokLiveClient(unique_id=unique_id)
+            session.client = TikTokLiveClient(unique_id=unique_id) if unique_id else None
+
+            if session.client:
                 self._attach_events(session, chat_id)
 
-            piped = AudioVideoPiped(stream_url, stream_type=StreamType().local_stream) if video else \
-                    AudioPiped(stream_url, stream_type=StreamType().local_stream)
+            if video:
+                piped = AudioVideoPiped(stream_url)
+            else:
+                piped = AudioPiped(stream_url)
 
-            await self.pytgcalls.join_group_call(chat_id, piped)
+            join_kwargs = {}
+            if StreamType is not None:
+                stream_type = getattr(StreamType(), "local_stream", None)
+                if stream_type is not None:
+                    join_kwargs["stream_type"] = stream_type
+
+            await self.pytgcalls.join_group_call(chat_id, piped, **join_kwargs)
 
             session.is_active = True
             session.title = "TikTok Live"
@@ -100,8 +118,8 @@ class TikTokService:
                     "viewers": session.viewers,
                     "title": session.title,
                     "username": session.username,
-                    "source_url": tiktok_url
-                }
+                    "source_url": tiktok_url,
+                },
             }
 
         except Exception as e:
@@ -110,19 +128,24 @@ class TikTokService:
 
     async def stop(self, chat_id: int) -> Dict[str, Any]:
         session = self.sessions.get(chat_id)
+
         if not session or not session.is_active:
             return {"ok": False, "error": "لا يوجد بث نشط"}
 
         try:
-            await self.pytgcalls.leave_group_call(chat_id)
+            if self.pytgcalls:
+                await self.pytgcalls.leave_group_call(chat_id)
+
             if session.client:
                 await session.client.disconnect()
+
             if session.task:
                 session.task.cancel()
 
             session.is_active = False
             session.viewers = 0
             return {"ok": True, "state": {"status": "idle"}}
+
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -130,14 +153,13 @@ class TikTokService:
         session = self.sessions.get(chat_id)
         if not session:
             return {"status": "idle", "viewers": 0}
+
         return {
             "status": "playing" if session.is_active else "idle",
             "viewers": session.viewers,
             "title": session.title,
-            "username": session.username
+            "username": session.username,
         }
-
-    # ==================== Helpers ====================
 
     def _extract_unique_id(self, url: str) -> Optional[str]:
         import re
@@ -146,10 +168,16 @@ class TikTokService:
 
     async def _get_stream_url(self, url: str) -> Optional[str]:
         try:
-            ydl_opts = {"format": "best", "quiet": True, "no_warnings": True}
+            ydl_opts = {
+                "format": "best",
+                "quiet": True,
+                "no_warnings": True,
+            }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-                return info.get("url") or info.get("formats", [{}])[0].get("url")
+                if not info:
+                    return None
+                return info.get("url") or (info.get("formats") or [{}])[0].get("url")
         except Exception:
             return None
 
@@ -160,7 +188,6 @@ class TikTokService:
 
         @session.client.on(RoomUserSeqEvent)
         async def on_viewers(event: RoomUserSeqEvent):
-            # بعض الإصدارات تستخدم user_count والبعض الآخر viewer_count
             session.viewers = getattr(event, "user_count", getattr(event, "viewer_count", 0))
 
         @session.client.on(DisconnectEvent)
