@@ -1,5 +1,4 @@
 
-
 import asyncio
 import logging
 import os
@@ -15,10 +14,22 @@ try:
 except Exception:  # pragma: no cover
     StreamType = None
 
-try:
-    from pytgcalls.types.input_stream import AudioPiped, AudioVideoPiped
-except Exception:  # pragma: no cover
-    from pytgcalls.types import AudioPiped, AudioVideoPiped
+# PyTgCalls changed its export surface across versions.
+# We try the legacy paths first, then fall back to newer/alternate layouts,
+# and finally to a no-stream-object fallback that uses `play(...)`.
+AudioPiped = None
+AudioVideoPiped = None
+for _import_path in (
+    "pytgcalls.types.input_stream",
+    "pytgcalls.types.input_streams",
+    "pytgcalls.types",
+):
+    try:  # pragma: no cover - compatibility shim
+        _mod = __import__(_import_path, fromlist=["AudioPiped", "AudioVideoPiped"])
+        AudioPiped = getattr(_mod, "AudioPiped", AudioPiped)
+        AudioVideoPiped = getattr(_mod, "AudioVideoPiped", AudioVideoPiped)
+    except Exception:
+        pass
 
 import yt_dlp
 
@@ -90,18 +101,35 @@ class TikTokService:
             if session.client:
                 self._attach_events(session, chat_id)
 
-            if video:
-                piped = AudioVideoPiped(stream_url)
-            else:
-                piped = AudioPiped(stream_url)
-
             join_kwargs = {}
             if StreamType is not None:
-                stream_type = getattr(StreamType(), "local_stream", None)
-                if stream_type is not None:
-                    join_kwargs["stream_type"] = stream_type
+                try:
+                    stream_type = getattr(StreamType(), "local_stream", None)
+                    if stream_type is not None:
+                        join_kwargs["stream_type"] = stream_type
+                except Exception:
+                    pass
 
-            await self.pytgcalls.join_group_call(chat_id, piped, **join_kwargs)
+            joined = False
+            if video and AudioVideoPiped is not None and hasattr(self.pytgcalls, "join_group_call"):
+                try:
+                    await self.pytgcalls.join_group_call(chat_id, AudioVideoPiped(stream_url), **join_kwargs)
+                    joined = True
+                except Exception as exc:
+                    logger.warning(f"AudioVideoPiped join failed, fallback to play(): {exc}")
+
+            if not joined and AudioPiped is not None and hasattr(self.pytgcalls, "join_group_call"):
+                try:
+                    await self.pytgcalls.join_group_call(chat_id, AudioPiped(stream_url), **join_kwargs)
+                    joined = True
+                except Exception as exc:
+                    logger.warning(f"AudioPiped join failed, fallback to play(): {exc}")
+
+            if not joined:
+                if hasattr(self.pytgcalls, "play"):
+                    await self.pytgcalls.play(chat_id, stream_url)
+                else:
+                    raise RuntimeError("pytgcalls_unsupported_api")
 
             session.is_active = True
             session.title = "TikTok Live"
