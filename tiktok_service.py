@@ -9,7 +9,7 @@ from typing import Optional, Dict, Any
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from TikTokLive import TikTokLiveClient
-from TikTokLive.events import ConnectEvent, DisconnectEvent, ViewerCountUpdateEvent
+from TikTokLive.events import ConnectEvent, DisconnectEvent, RoomUserCountUpdateEvent
 from pytgcalls import PyTgCalls
 from pytgcalls.types import AudioVideoPiped, AudioPiped, StreamType
 import yt_dlp
@@ -158,9 +158,10 @@ class TikTokService:
         async def on_connect(_: ConnectEvent):
             session.is_active = True
 
-        @session.client.on(ViewerCountUpdateEvent)
-        async def on_viewers(event: ViewerCountUpdateEvent):
-            session.viewers = event.viewer_count
+        @session.client.on(RoomUserCountUpdateEvent)
+        async def on_viewers(event: RoomUserCountUpdateEvent):
+            # في بعض الإصدارات يكون event.user_count
+            session.viewers = getattr(event, "user_count", getattr(event, "viewer_count", 0))
 
         @session.client.on(DisconnectEvent)
         async def on_disconnect(_: DisconnectEvent):
