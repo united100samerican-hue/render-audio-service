@@ -11,7 +11,7 @@ from telethon.sessions import StringSession
 from TikTokLive import TikTokLiveClient
 from TikTokLive.events import ConnectEvent, DisconnectEvent, RoomUserSeqEvent
 from pytgcalls import PyTgCalls
-from pytgcalls.types import AudioVideoPiped, AudioPiped, StreamType
+from pytgcalls.types.input_stream import AudioPiped, AudioVideoPiped, StreamType
 import yt_dlp
 
 logger = logging.getLogger("tiktok_service")
