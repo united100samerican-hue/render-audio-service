@@ -202,6 +202,9 @@ class TikTokService:
                 "no_warnings": True,
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                cookiefile = os.getenv("TIKTOK_COOKIES_FILE", "").strip()
+if cookiefile:
+    ydl_opts["cookiefile"] = cookiefile
                 info = ydl.extract_info(url, download=False)
                 if not info:
                     return None
