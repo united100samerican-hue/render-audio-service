@@ -195,22 +195,27 @@ class TikTokService:
         return match.group(1) or match.group(2) if match else None
 
     async def _get_stream_url(self, url: str) -> Optional[str]:
-        try:
-            ydl_opts = {
-                "format": "best",
-                "quiet": True,
-                "no_warnings": True,
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                cookiefile = os.getenv("TIKTOK_COOKIES_FILE", "").strip()
-if cookiefile:
-    ydl_opts["cookiefile"] = cookiefile
-                info = ydl.extract_info(url, download=False)
-                if not info:
-                    return None
-                return info.get("url") or (info.get("formats") or [{}])[0].get("url")
-        except Exception:
-            return None
+    try:
+        cookiefile = os.getenv("TIKTOK_COOKIES_FILE", "").strip()
+
+        ydl_opts = {
+            "format": "best",
+            "quiet": True,
+            "no_warnings": True,
+        }
+
+        if cookiefile:
+            ydl_opts["cookiefile"] = cookiefile
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if not info:
+                return None
+            return info.get("url") or (info.get("formats") or [{}])[0].get("url")
+
+    except Exception as e:
+        logger.exception("TikTok stream URL extraction failed")
+        return None
 
     def _attach_events(self, session: TikTokSession, chat_id: int):
         @session.client.on(ConnectEvent)
