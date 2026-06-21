@@ -1,24 +1,28 @@
-
 import asyncio
 import logging
 import os
+import re
+import tempfile
+from pathlib import Path
 from typing import Any, Dict, Optional
 
+import yt_dlp
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from TikTokLive import TikTokLiveClient
 from TikTokLive.events import ConnectEvent, DisconnectEvent, RoomUserSeqEvent
 from pytgcalls import PyTgCalls
+
 try:
     from pytgcalls import StreamType
 except Exception:  # pragma: no cover
-    StreamType = None
+    StreamType = None  # PyTgCalls changed its export surface across versions.
 
-# PyTgCalls changed its export surface across versions.
 # We try the legacy paths first, then fall back to newer/alternate layouts,
 # and finally to a no-stream-object fallback that uses `play(...)`.
 AudioPiped = None
 AudioVideoPiped = None
+
 for _import_path in (
     "pytgcalls.types.input_stream",
     "pytgcalls.types.input_streams",
@@ -30,8 +34,6 @@ for _import_path in (
         AudioVideoPiped = getattr(_mod, "AudioVideoPiped", AudioVideoPiped)
     except Exception:
         pass
-
-import yt_dlp
 
 logger = logging.getLogger("tiktok_service")
 
@@ -62,6 +64,28 @@ class TikTokService:
         self._boot_lock = asyncio.Lock()
         self._ready = False
 
+    def _cookie_file_path(self) -> Optional[str]:
+        """
+        Priority:
+        1) TIKTOK_COOKIES_FILE -> path to an existing cookies.txt file
+        2) TIKTOK_COOKIES -> raw Netscape cookie text, written to /tmp
+        """
+        cookiefile = os.getenv("TIKTOK_COOKIES_FILE", "").strip()
+        if cookiefile:
+            if Path(cookiefile).exists():
+                return cookiefile
+            logger.warning("TIKTOK_COOKIES_FILE is set but file does not exist: %s", cookiefile)
+
+        raw_cookies = os.getenv("TIKTOK_COOKIES", "").strip()
+        if raw_cookies:
+            tmp_path = Path(tempfile.gettempdir()) / "tiktok_cookies.txt"
+            try:
+                tmp_path.write_text(raw_cookies, encoding="utf-8")
+                return str(tmp_path)
+            except Exception:
+                logger.exception("Failed to write TIKTOK_COOKIES to temp file")
+        return None
+
     async def boot(self):
         if self._ready:
             return
@@ -81,6 +105,7 @@ class TikTokService:
 
             self.pytgcalls = PyTgCalls(self.client)
             await self.pytgcalls.start()
+
             self._ready = True
             logger.info("TikTokService booted successfully")
 
@@ -101,7 +126,7 @@ class TikTokService:
             if session.client:
                 self._attach_events(session, chat_id)
 
-            join_kwargs = {}
+            join_kwargs: Dict[str, Any] = {}
             if StreamType is not None:
                 try:
                     stream_type = getattr(StreamType(), "local_stream", None)
@@ -111,19 +136,20 @@ class TikTokService:
                     pass
 
             joined = False
+
             if video and AudioVideoPiped is not None and hasattr(self.pytgcalls, "join_group_call"):
                 try:
                     await self.pytgcalls.join_group_call(chat_id, AudioVideoPiped(stream_url), **join_kwargs)
                     joined = True
                 except Exception as exc:
-                    logger.warning(f"AudioVideoPiped join failed, fallback to play(): {exc}")
+                    logger.warning("AudioVideoPiped join failed, fallback to play(): %s", exc)
 
             if not joined and AudioPiped is not None and hasattr(self.pytgcalls, "join_group_call"):
                 try:
                     await self.pytgcalls.join_group_call(chat_id, AudioPiped(stream_url), **join_kwargs)
                     joined = True
                 except Exception as exc:
-                    logger.warning(f"AudioPiped join failed, fallback to play(): {exc}")
+                    logger.warning("AudioPiped join failed, fallback to play(): %s", exc)
 
             if not joined:
                 if hasattr(self.pytgcalls, "play"):
@@ -137,6 +163,7 @@ class TikTokService:
 
             if session.task:
                 session.task.cancel()
+
             session.task = asyncio.create_task(self._viewer_loop(session, chat_id))
 
             return {
@@ -151,27 +178,35 @@ class TikTokService:
             }
 
         except Exception as e:
-            logger.error(f"TikTok start error: {e}")
+            logger.error("TikTok start error: %s", e)
             return {"ok": False, "error": str(e)}
 
     async def stop(self, chat_id: int) -> Dict[str, Any]:
         session = self.sessions.get(chat_id)
-
         if not session or not session.is_active:
             return {"ok": False, "error": "لا يوجد بث نشط"}
 
         try:
             if self.pytgcalls:
-                await self.pytgcalls.leave_group_call(chat_id)
+                try:
+                    await self.pytgcalls.leave_group_call(chat_id)
+                except Exception:
+                    # Some PyTgCalls versions expose leave_group_call, others may differ.
+                    if hasattr(self.pytgcalls, "stop"):
+                        await self.pytgcalls.stop(chat_id)
 
             if session.client:
-                await session.client.disconnect()
+                try:
+                    await session.client.disconnect()
+                except Exception:
+                    pass
 
             if session.task:
                 session.task.cancel()
 
             session.is_active = False
             session.viewers = 0
+
             return {"ok": True, "state": {"status": "idle"}}
 
         except Exception as e:
@@ -190,32 +225,31 @@ class TikTokService:
         }
 
     def _extract_unique_id(self, url: str) -> Optional[str]:
-        import re
         match = re.search(r"@([\w\.-]+)|tiktok\.com/@([\w\.-]+)", url)
-        return match.group(1) or match.group(2) if match else None
+        return (match.group(1) or match.group(2)) if match else None
 
     async def _get_stream_url(self, url: str) -> Optional[str]:
-    try:
-        cookiefile = os.getenv("TIKTOK_COOKIES_FILE", "").strip()
+        try:
+            ydl_opts = {
+                "format": "best",
+                "quiet": True,
+                "no_warnings": True,
+            }
 
-        ydl_opts = {
-            "format": "best",
-            "quiet": True,
-            "no_warnings": True,
-        }
+            cookiefile = self._cookie_file_path()
+            if cookiefile:
+                ydl_opts["cookiefile"] = cookiefile
 
-        if cookiefile:
-            ydl_opts["cookiefile"] = cookiefile
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if not info:
+                    return None
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            if not info:
-                return None
-            return info.get("url") or (info.get("formats") or [{}])[0].get("url")
+                return info.get("url") or (info.get("formats") or [{}])[0].get("url")
 
-    except Exception as e:
-        logger.exception("TikTok stream URL extraction failed")
-        return None
+        except Exception:
+            logger.exception("TikTok stream URL extraction failed")
+            return None
 
     def _attach_events(self, session: TikTokSession, chat_id: int):
         @session.client.on(ConnectEvent)
@@ -230,6 +264,7 @@ class TikTokService:
         async def on_disconnect(_: DisconnectEvent):
             session.is_active = False
 
+        # Start the TikTok client task without blocking the service.
         asyncio.create_task(session.client.start())
 
     async def _viewer_loop(self, session: TikTokSession, chat_id: int):
