@@ -1,19 +1,27 @@
-import asyncio, os, subprocess, time, logging
+import asyncio
+import os
+import subprocess
+import time
+import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
+
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+
 try:
-from pytgcalls import GroupCallFactory
+    from pytgcalls import GroupCallFactory
 except Exception as exc:
-raise RuntimeError("pytgcalls import failed") from exc
+    raise RuntimeError("pytgcalls import failed") from exc
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("recording_service")
+
 APP_NAME = "voice-recorder-service"
 ROOT = Path(os.getenv("RECORDINGS_ROOT", "/tmp/voice-recorder")).resolve()
 ROOT.mkdir(parents=True, exist_ok=True)
@@ -23,6 +31,10 @@ SILENCE_WAV = ROOT / "silence.wav"
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "180"))
 MAX_RECORDING_MINUTES = int(os.getenv("MAX_RECORDING_MINUTES", "180"))
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+RECORDING_SECRET = os.getenv("RECORDING_SECRET", "").strip()
+SESSION_STRING = os.getenv("SESSION_STRING", "").strip()
+API_ID = int(os.getenv("API_ID", "0") or 0)
+API_HASH = os.getenv("API_HASH", "").strip()
 RECORDING_SECRET = os.getenv("RECORDING_SECRET", "").strip()
 SESSION_STRING = os.getenv("SESSION_STRING", "").strip()
 API_ID = int(os.getenv("API_ID", "0") or 0)
