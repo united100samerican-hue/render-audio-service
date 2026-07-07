@@ -14,16 +14,11 @@ from pydantic import BaseModel, Field
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
-try:
-    from pytgcalls import GroupCallFactory
-except Exception as exc:  # pragma: no cover
-    raise RuntimeError("pytgcalls import failed") from exc
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("recording_service")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 
 APP_NAME = "voice-recorder-service"
-ROOT = Path(os.getenv("RECORDINGS_ROOT", "/tmp/voice-recorder")).resolve()
+ROOT = Path("/tmp/voice-recorder")
 ROOT.mkdir(parents=True, exist_ok=True)
 RECORDINGS_DIR = ROOT / "recordings"
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -38,8 +33,23 @@ SESSION_STRING = os.getenv("SESSION_STRING", "").strip()
 API_ID = int(os.getenv("API_ID", "0") or 0)
 API_HASH = os.getenv("API_HASH", "").strip()
 
+RECORDING_BACKEND_AVAILABLE = True
+RECORDING_BACKEND_ERROR = ""
 
-def ensure_silence() -> None:
+try:
+    from pytgcalls import GroupCallFactory
+except Exception as exc:  # pragma: no cover
+    GroupCallFactory = None
+    RECORDING_BACKEND_AVAILABLE = False
+    RECORDING_BACKEND_ERROR = f"{type(exc).__name__}: {exc}"
+    logger.warning("pytgcalls import failed: %s", RECORDING_BACKEND_ERROR)
+
+client: Optional[TelegramClient] = None
+manager: Optional["RecorderManager"] = None
+_boot_lock = asyncio.Lock()
+
+
+def _ensure_silence() -> None:
     if SILENCE_WAV.exists() and SILENCE_WAV.stat().st_size > 0:
         return
     subprocess.run(
@@ -65,7 +75,6 @@ def ensure_silence() -> None:
 @dataclass
 class RecorderSession:
     chat_id: str
-    deliver_to: str = ""
     status: str = "idle"
     started_at: float = 0.0
     output_path: Path = field(default_factory=Path)
@@ -81,7 +90,6 @@ class RecorderSession:
 
 class StartRequest(BaseModel):
     chat_id: str = Field(..., min_length=1)
-    deliver_to: str = Field(..., min_length=1)
     started_by: str = ""
     group_title: str = ""
     title: str = ""
@@ -89,10 +97,10 @@ class StartRequest(BaseModel):
 
 class StopRequest(BaseModel):
     chat_id: str = Field(..., min_length=1)
-    deliver_to: str = ""
     group_title: str = ""
     stopped_by: str = ""
     caption: str = ""
+    auto: bool = False
 
 
 class StatusRequest(BaseModel):
@@ -101,6 +109,8 @@ class StatusRequest(BaseModel):
 
 class RecorderManager:
     def __init__(self, client: TelegramClient) -> None:
+        if GroupCallFactory is None:
+            raise RuntimeError(RECORDING_BACKEND_ERROR or "pytgcalls unavailable")
         self.client = client
         self.factory = GroupCallFactory(
             self.client,
@@ -110,43 +120,28 @@ class RecorderManager:
         self.lock = asyncio.Lock()
 
     def _new_output_path(self, chat_id: str) -> Path:
-        return RECORDINGS_DIR / f"recording{chat_id}{int(time.time())}.ogg"
+        return RECORDINGS_DIR / f"recording_{chat_id}_{int(time.time())}.ogg"
 
-    async def _upload_to_telegram(self, deliver_to: str, path: Path, caption: str) -> tuple[bool, str]:
+    async def _upload_to_telegram(self, chat_id: str, path: Path, caption: str) -> tuple[bool, str]:
         if not BOT_TOKEN:
             return False, "BOT_TOKEN missing"
-        if not deliver_to:
-            return False, "deliver_to missing"
         if not path.exists() or path.stat().st_size == 0:
             return False, "recording file missing"
 
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as http:
             for endpoint, field_name in (("sendAudio", "audio"), ("sendDocument", "document")):
+                with path.open("rb") as fh:
+                    files = {field_name: (path.name, fh, "application/octet-stream")}
+                    data = {"chat_id": chat_id, "caption": caption or ""}
+                    if endpoint == "sendAudio":
+                        data["supports_streaming"] = "true"
+                    response = await http.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{endpoint}", data=data, files=files)
                 try:
-                    with path.open("rb") as fh:
-                        files = {field_name: (path.name, fh, "application/octet-stream")}
-                        data = {"chat_id": deliver_to, "caption": caption or ""}
-                        if endpoint == "sendAudio":
-                            data["supports_streaming"] = "true"
-                        r = await client.post(
-                            f"https://api.telegram.org/bot{BOT_TOKEN}/{endpoint}",
-                            data=data,
-                            files=files,
-                        )
-                    try:
-                        j = r.json()
-                    except Exception:
-                        j = None
-                    if r.status_code < 400 and isinstance(j, dict) and j.get("ok"):
-                        return True, endpoint
-                    logger.error(
-                        "telegram upload failed endpoint=%s status=%s body=%s",
-                        endpoint,
-                        r.status_code,
-                        getattr(r, "text", ""),
-                    )
+                    payload = response.json()
                 except Exception:
-                    logger.exception("telegram upload exception endpoint=%s", endpoint)
+                    payload = None
+                if response.status_code < 400 and isinstance(payload, dict) and payload.get("ok"):
+                    return True, endpoint
         return False, "telegram_send_failed"
 
     async def _auto_stop_after(self, chat_id: str, minutes: int) -> None:
@@ -156,10 +151,10 @@ class RecorderManager:
         except asyncio.CancelledError:
             return
         except Exception:
-            logger.exception("auto_stop_failed chat_id=%s", chat_id)
+            return
 
     async def _start_file_recorder(self, session: RecorderSession) -> None:
-        ensure_silence()
+        _ensure_silence()
         call = self.factory.get_file_group_call(
             input_filename=str(SILENCE_WAV),
             output_filename=str(session.output_path),
@@ -172,7 +167,7 @@ class RecorderManager:
     async def _start_raw_recorder(self, session: RecorderSession) -> None:
         buffer = session.output_path.open("wb")
 
-        def on_recorded_data(*args):
+        def on_recorded_data(*args: Any) -> None:
             chunk = None
             for item in args:
                 if isinstance(item, (bytes, bytearray)):
@@ -187,27 +182,14 @@ class RecorderManager:
         session.file_handle = buffer
         session.mode = "raw"
 
-    async def start(
-        self,
-        chat_id: str,
-        deliver_to: str,
-        started_by: str = "",
-        group_title: str = "",
-        title: str = "",
-    ) -> dict[str, Any]:
+    async def start(self, chat_id: str, started_by: str = "", group_title: str = "", title: str = "") -> dict[str, Any]:
         async with self.lock:
             current = self.sessions.get(chat_id)
             if current and current.status == "recording":
-                return {
-                    "ok": True,
-                    "recording": True,
-                    "mode": current.mode,
-                    "file_name": current.output_path.name,
-                }
+                return {"ok": True, "recording": True, "mode": current.mode, "file_name": current.output_path.name}
 
             session = RecorderSession(
                 chat_id=chat_id,
-                deliver_to=deliver_to,
                 status="recording",
                 started_at=time.time(),
                 output_path=self._new_output_path(chat_id),
@@ -216,24 +198,19 @@ class RecorderManager:
                 title=title,
             )
             self.sessions[chat_id] = session
+
             try:
                 try:
                     await self._start_file_recorder(session)
                 except Exception as exc:
                     session.last_error = str(exc)
-                    logger.exception("file recorder failed, switching to raw mode chat_id=%s", chat_id)
                     await self._start_raw_recorder(session)
+
                 session.stop_task = asyncio.create_task(self._auto_stop_after(chat_id, MAX_RECORDING_MINUTES))
-                return {
-                    "ok": True,
-                    "recording": True,
-                    "mode": session.mode,
-                    "file_name": session.output_path.name,
-                }
+                return {"ok": True, "recording": True, "mode": session.mode, "file_name": session.output_path.name}
             except Exception as exc:
                 session.status = "error"
                 session.last_error = str(exc)
-                logger.exception("start failed chat_id=%s", chat_id)
                 self.sessions.pop(chat_id, None)
                 try:
                     if session.file_handle:
@@ -242,15 +219,7 @@ class RecorderManager:
                     pass
                 raise
 
-    async def stop(
-        self,
-        chat_id: str,
-        auto: bool = False,
-        deliver_to: str = "",
-        stopped_by: str = "",
-        group_title: str = "",
-        caption: str = "",
-    ) -> dict[str, Any]:
+    async def stop(self, chat_id: str, auto: bool = False, stopped_by: str = "", group_title: str = "", caption: str = "") -> dict[str, Any]:
         async with self.lock:
             session = self.sessions.get(chat_id)
             if not session:
@@ -268,40 +237,18 @@ class RecorderManager:
                             await maybe
             except Exception as exc:
                 session.last_error = str(exc)
-                logger.exception("stop call failed chat_id=%s", chat_id)
             finally:
                 try:
                     if session.file_handle:
                         session.file_handle.flush()
                         session.file_handle.close()
                 except Exception:
-                    logger.exception("file handle close failed chat_id=%s", chat_id)
+                    pass
 
             session.status = "stopped"
-            target = (deliver_to or session.deliver_to or "").strip()
-            if not target:
-                logger.error("missing deliver_to on stop chat_id=%s", chat_id)
-                self.sessions.pop(chat_id, None)
-                return {
-                    "ok": False,
-                    "error": "deliver_to_missing",
-                    "file_name": session.output_path.name,
-                    "mode": session.mode,
-                }
-
-            meta = [
-                x
-                for x in [
-                    session.group_title,
-                    group_title,
-                    caption,
-                    f"by:{stopped_by}" if stopped_by else "",
-                ]
-                if x
-            ]
+            meta = [x for x in [session.group_title, caption, f"by:{stopped_by}" if stopped_by else ""] if x]
             caption_text = " | ".join(meta).strip() or "voice chat recording"
-            sent, result = await self._upload_to_telegram(target, session.output_path, caption_text)
-            size = session.output_path.stat().st_size if session.output_path.exists() else 0
+            sent, result = await self._upload_to_telegram(chat_id, session.output_path, caption_text)
             data = {
                 "ok": True,
                 "recording": False,
@@ -309,14 +256,13 @@ class RecorderManager:
                 "sent": sent,
                 "send_result": result,
                 "mode": session.mode,
-                "size": size,
-                "last_error": session.last_error,
+                "size": session.output_path.stat().st_size if session.output_path.exists() else 0,
             }
             try:
                 if sent:
                     session.output_path.unlink(missing_ok=True)
             except Exception:
-                logger.exception("cleanup failed chat_id=%s", chat_id)
+                pass
             self.sessions.pop(chat_id, None)
             return data
 
@@ -332,110 +278,134 @@ class RecorderManager:
                 "file_name": session.output_path.name,
                 "started_at": session.started_at,
                 "last_error": session.last_error,
-                "deliver_to": session.deliver_to,
             }
 
+    async def shutdown(self) -> None:
+        async with self.lock:
+            sessions = list(self.sessions.values())
+            self.sessions.clear()
 
-client: Optional[TelegramClient] = None
-manager: Optional[RecorderManager] = None
+        for session in sessions:
+            try:
+                if session.stop_task and not session.stop_task.done():
+                    session.stop_task.cancel()
+            except Exception:
+                pass
+            try:
+                if session.call:
+                    stop = getattr(session.call, "stop", None)
+                    if callable(stop):
+                        maybe = stop()
+                        if asyncio.iscoroutine(maybe):
+                            await maybe
+            except Exception:
+                pass
+            try:
+                if session.file_handle:
+                    session.file_handle.close()
+            except Exception:
+                pass
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+async def ensure_manager() -> Optional[RecorderManager]:
     global client, manager
-    if not SESSION_STRING or not API_ID or not API_HASH:
-        raise RuntimeError("Missing SESSION_STRING / API_ID / API_HASH")
-    client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
-    await client.start()
-    manager = RecorderManager(client)
-    try:
-        yield
-    finally:
+    async with _boot_lock:
+        if manager is not None:
+            return manager
+        if not RECORDING_BACKEND_AVAILABLE:
+            return None
+        if not SESSION_STRING or not API_ID or not API_HASH:
+            return None
+
+        client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+        await client.start()
         try:
-            if manager:
-                for session in list(manager.sessions.values()):
-                    if session.stop_task and not session.stop_task.done():
-                        session.stop_task.cancel()
-                    try:
-                        if session.call:
-                            stop = getattr(session.call, "stop", None)
-                            if callable(stop):
-                                maybe = stop()
-                                if asyncio.iscoroutine(maybe):
-                                    await maybe
-                    except Exception:
-                        logger.exception("lifespan stop failed chat_id=%s", session.chat_id)
-                    try:
-                        if session.file_handle:
-                            session.file_handle.close()
-                    except Exception:
-                        logger.exception("lifespan file close failed chat_id=%s", session.chat_id)
-        finally:
-            if client:
+            manager = RecorderManager(client)
+        except Exception:
+            try:
                 await client.disconnect()
-
-
-app = FastAPI(title=APP_NAME, lifespan=lifespan)
+            except Exception:
+                pass
+            client = None
+            raise
+        return manager
 
 
 def _check_secret(request: Request) -> None:
     if not RECORDING_SECRET:
         return
-    secret = request.headers.get("x-recording-secret", "") or request.headers.get("x-keepalive-secret", "")
-    if secret != RECORDING_SECRET:
+    if request.headers.get("x-recording-secret", "") != RECORDING_SECRET:
         raise HTTPException(status_code=403, detail="forbidden")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        await ensure_manager()
+        yield
+    finally:
+        global client, manager
+        try:
+            if manager is not None:
+                await manager.shutdown()
+        finally:
+            if client is not None:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+            manager = None
+            client = None
+
+
+app = FastAPI(title=APP_NAME, lifespan=lifespan)
 
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "service": APP_NAME}
+    return {"ok": True, "service": APP_NAME, "recording_backend": RECORDING_BACKEND_AVAILABLE}
 
 
 @app.post("/record/start")
 async def record_start(payload: StartRequest, request: Request):
     _check_secret(request)
-    if manager is None:
-        raise HTTPException(status_code=503, detail="service_not_ready")
+    current = await ensure_manager()
+    if current is None:
+        raise HTTPException(status_code=503, detail=f"service_not_ready: {RECORDING_BACKEND_ERROR or 'missing_env'}")
     try:
-        return await manager.start(
-            payload.chat_id,
-            payload.deliver_to,
-            payload.started_by,
-            payload.group_title,
-            payload.title,
-        )
+        return await current.start(payload.chat_id, payload.started_by, payload.group_title, payload.title)
     except Exception as exc:
-        logger.exception("record_start error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/record/stop")
 async def record_stop(payload: StopRequest, request: Request):
     _check_secret(request)
-    if manager is None:
-        raise HTTPException(status_code=503, detail="service_not_ready")
+    current = await ensure_manager()
+    if current is None:
+        raise HTTPException(status_code=503, detail=f"service_not_ready: {RECORDING_BACKEND_ERROR or 'missing_env'}")
     try:
-        return await manager.stop(
+        return await current.stop(
             payload.chat_id,
-            deliver_to=payload.deliver_to,
+            auto=payload.auto,
             stopped_by=payload.stopped_by,
             group_title=payload.group_title,
             caption=payload.caption,
         )
     except Exception as exc:
-        logger.exception("record_stop error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/record/status")
 async def record_status(payload: StatusRequest, request: Request):
     _check_secret(request)
-    if manager is None:
-        raise HTTPException(status_code=503, detail="service_not_ready")
-    return await manager.status(payload.chat_id)
+    current = await ensure_manager()
+    if current is None:
+        return {"ok": True, "recording": False, "service_ready": False, "reason": RECORDING_BACKEND_ERROR or "missing_env"}
+    return await current.status(payload.chat_id)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     import uvicorn
 
     uvicorn.run("recording_service:app", host="0.0.0.0", port=int(os.getenv("PORT", "10000")), reload=False)
