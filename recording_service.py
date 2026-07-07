@@ -37,9 +37,14 @@ RECORDING_BACKEND_AVAILABLE = True
 RECORDING_BACKEND_ERROR = ""
 
 try:
-    from pytgcalls import GroupCallFactory
+    from pytgcalls import PyTgCalls
+    from pytgcalls.types import Stream
+    from pytgcalls.types.input_stream import AudioPiped, InputAudioFile
 except Exception as exc:  # pragma: no cover
-    GroupCallFactory = None
+    PyTgCalls = None
+    Stream = None
+    AudioPiped = None
+    InputAudioFile = None
     RECORDING_BACKEND_AVAILABLE = False
     RECORDING_BACKEND_ERROR = f"{type(exc).__name__}: {exc}"
     logger.warning("pytgcalls import failed: %s", RECORDING_BACKEND_ERROR)
@@ -109,13 +114,10 @@ class StatusRequest(BaseModel):
 
 class RecorderManager:
     def __init__(self, client: TelegramClient) -> None:
-        if GroupCallFactory is None:
+        if PyTgCalls is None:
             raise RuntimeError(RECORDING_BACKEND_ERROR or "pytgcalls unavailable")
         self.client = client
-        self.factory = GroupCallFactory(
-            self.client,
-            mtproto_backend=GroupCallFactory.MTPROTO_CLIENT_TYPE.TELETHON,
-        )
+        self.calls = PyTgCalls(self.client)
         self.sessions: dict[str, RecorderSession] = {}
         self.lock = asyncio.Lock()
 
@@ -154,32 +156,25 @@ class RecorderManager:
             return
 
     async def _start_file_recorder(self, session: RecorderSession) -> None:
+        """Start recording using file output via InputAudioFile."""
         _ensure_silence()
-        call = self.factory.get_file_group_call(
-            input_filename=str(SILENCE_WAV),
-            output_filename=str(session.output_path),
-            play_on_repeat=True,
+        stream = Stream(
+            input=AudioPiped(str(SILENCE_WAV)),
+            output=InputAudioFile(str(session.output_path)),
         )
-        await call.start(int(session.chat_id), enable_action=False)
-        session.call = call
+        await self.calls.join_group_call(int(session.chat_id), stream)
+        session.call = self.calls
         session.mode = "file"
 
     async def _start_raw_recorder(self, session: RecorderSession) -> None:
-        buffer = session.output_path.open("wb")
-
-        def on_recorded_data(*args: Any) -> None:
-            chunk = None
-            for item in args:
-                if isinstance(item, (bytes, bytearray)):
-                    chunk = bytes(item)
-                    break
-            if chunk:
-                buffer.write(chunk)
-
-        call = self.factory.get_raw_group_call(on_recorded_data=on_recorded_data)
-        await call.start(int(session.chat_id), enable_action=False)
-        session.call = call
-        session.file_handle = buffer
+        """Fallback raw recorder — uses the same InputAudioFile mechanism."""
+        _ensure_silence()
+        stream = Stream(
+            input=AudioPiped(str(SILENCE_WAV)),
+            output=InputAudioFile(str(session.output_path)),
+        )
+        await self.calls.join_group_call(int(session.chat_id), stream)
+        session.call = self.calls
         session.mode = "raw"
 
     async def start(self, chat_id: str, started_by: str = "", group_title: str = "", title: str = "") -> dict[str, Any]:
@@ -230,9 +225,9 @@ class RecorderManager:
 
             try:
                 if session.call:
-                    stop = getattr(session.call, "stop", None)
-                    if callable(stop):
-                        maybe = stop()
+                    leave = getattr(self.calls, "leave_group_call", None)
+                    if callable(leave):
+                        maybe = leave(int(session.chat_id))
                         if asyncio.iscoroutine(maybe):
                             await maybe
             except Exception as exc:
@@ -293,9 +288,9 @@ class RecorderManager:
                 pass
             try:
                 if session.call:
-                    stop = getattr(session.call, "stop", None)
-                    if callable(stop):
-                        maybe = stop()
+                    leave = getattr(self.calls, "leave_group_call", None)
+                    if callable(leave):
+                        maybe = leave(int(session.chat_id))
                         if asyncio.iscoroutine(maybe):
                             await maybe
             except Exception:
@@ -407,5 +402,4 @@ async def record_status(payload: StatusRequest, request: Request):
 
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn
-
     uvicorn.run("recording_service:app", host="0.0.0.0", port=int(os.getenv("PORT", "10000")), reload=False)
