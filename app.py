@@ -1,13 +1,15 @@
 import asyncio
+import logging
 import os
+from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Request, Body
-from telethon import TelegramClient
-from telethon.sessions import StringSession
+from fastapi import Body, FastAPI, Header, HTTPException, Request
 
 from player import VoicePlayer
 from tiktok_service import TikTokService
-import recording_service as rec
+
+logger = logging.getLogger("render-audio-service")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 
 app = FastAPI(title="Render Audio Service", version="2.1")
 
@@ -15,100 +17,64 @@ player = VoicePlayer()
 tiktok_service = TikTokService()
 
 SECRET = os.getenv("KEEPALIVE_SECRET", "").strip()
+RECORDING_SECRET = os.getenv("RECORDING_SECRET", "").strip()
 
-def guard(v: str | None):
-    if SECRET and (v or "").strip() != SECRET:
+try:
+    import recording_service as rec
+except Exception as exc:  # pragma: no cover
+    rec = None
+    logger.warning("recording_service import failed: %s", exc)
+
+
+def guard(expected: str, provided: str | None) -> None:
+    if expected and (provided or "").strip() != expected:
         raise HTTPException(status_code=403, detail="forbidden")
 
-async def _body(req: Request):
+
+async def _body(req: Request) -> dict[str, Any]:
     try:
-        return await req.json()
+        body = await req.json()
     except Exception:
         raise HTTPException(status_code=400, detail="invalid_json")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="invalid_json")
+    return body
 
-def _record_expected_secrets() -> set[str]:
-    return {s for s in [getattr(rec, "RECORDING_SECRET", ""), SECRET] if str(s).strip()}
 
-def _record_guard(x_recording_secret: str | None = None, x_keepalive_secret: str | None = None):
-    provided = (x_recording_secret or x_keepalive_secret or "").strip()
-    expected = _record_expected_secrets()
-    if expected and provided not in expected:
-        raise HTTPException(status_code=403, detail="forbidden")
+def _chat_id(body: dict[str, Any]) -> str:
+    value = body.get("chatId", body.get("chat_id", ""))
+    return str(value).strip()
 
-async def _init_recording():
-    if rec.manager is not None:
-        return
-    if not getattr(rec, "SESSION_STRING", "").strip() or not getattr(rec, "API_ID", 0) or not getattr(rec, "API_HASH", "").strip():
-        return
-    rec.client = TelegramClient(StringSession(rec.SESSION_STRING), int(rec.API_ID), rec.API_HASH)
-    await rec.client.start()
-    rec.manager = rec.RecorderManager(rec.client)
 
-async def _shutdown_recording():
-    try:
-        if rec.manager is not None:
-            for session in list(rec.manager.sessions.values()):
-                try:
-                    if session.stop_task and not session.stop_task.done():
-                        session.stop_task.cancel()
-                except Exception:
-                    pass
-                try:
-                    if session.call:
-                        stop = getattr(session.call, "stop", None)
-                        if callable(stop):
-                            maybe = stop()
-                            if asyncio.iscoroutine(maybe):
-                                await maybe
-                except Exception:
-                    pass
-                try:
-                    if session.file_handle:
-                        session.file_handle.close()
-                except Exception:
-                    pass
-    finally:
-        try:
-            if rec.client is not None:
-                await rec.client.disconnect()
-        except Exception:
-            pass
-        rec.manager = None
-        rec.client = None
+async def _record_manager():
+    if rec is None:
+        raise HTTPException(status_code=503, detail="recording_service_unavailable")
+    await rec.ensure_manager()
+    if rec.manager is None:
+        reason = rec.RECORDING_BACKEND_ERROR or "missing_env"
+        raise HTTPException(status_code=503, detail=f"service_not_ready: {reason}")
+    return rec.manager
 
-@app.on_event("startup")
-async def _startup():
-    await _init_recording()
-
-@app.on_event("shutdown")
-async def _shutdown():
-    await _shutdown_recording()
 
 @app.get("/")
 async def root():
     return {"ok": True, "service": "render-audio-service"}
 
+
 @app.get("/ping")
 async def ping(x_keepalive_secret: str | None = Header(default=None)):
-    guard(x_keepalive_secret)
+    guard(SECRET, x_keepalive_secret)
     return {"ok": True}
+
 
 @app.get("/healthz")
 async def healthz():
     return {"ok": True, "ready": True}
 
-@app.get("/health")
-async def health():
-    return {
-        "ok": True,
-        "service": "render-audio-service",
-        "recording_ready": rec.manager is not None,
-        "recording_app": getattr(rec, "APP_NAME", "voice-recorder-service"),
-    }
 
 @app.post("/meta")
 async def meta(req: Request, x_keepalive_secret: str | None = Header(default=None)):
-    guard(x_keepalive_secret)
+    guard(SECRET, x_keepalive_secret)
     body = await _body(req)
     try:
         state = await player.meta(
@@ -122,9 +88,10 @@ async def meta(req: Request, x_keepalive_secret: str | None = Header(default=Non
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+
 @app.post("/start")
 async def start(req: Request, x_keepalive_secret: str | None = Header(default=None)):
-    guard(x_keepalive_secret)
+    guard(SECRET, x_keepalive_secret)
     body = await _body(req)
     try:
         state = await player.start(
@@ -138,9 +105,10 @@ async def start(req: Request, x_keepalive_secret: str | None = Header(default=No
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+
 @app.post("/pause")
 async def pause(req: Request, x_keepalive_secret: str | None = Header(default=None)):
-    guard(x_keepalive_secret)
+    guard(SECRET, x_keepalive_secret)
     body = await _body(req)
     try:
         state = await player.pause(body["chatId"])
@@ -148,9 +116,10 @@ async def pause(req: Request, x_keepalive_secret: str | None = Header(default=No
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+
 @app.post("/resume")
 async def resume(req: Request, x_keepalive_secret: str | None = Header(default=None)):
-    guard(x_keepalive_secret)
+    guard(SECRET, x_keepalive_secret)
     body = await _body(req)
     try:
         state = await player.resume(body["chatId"])
@@ -158,9 +127,10 @@ async def resume(req: Request, x_keepalive_secret: str | None = Header(default=N
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+
 @app.post("/stop")
 async def stop(req: Request, x_keepalive_secret: str | None = Header(default=None)):
-    guard(x_keepalive_secret)
+    guard(SECRET, x_keepalive_secret)
     body = await _body(req)
     try:
         state = await player.stop(body["chatId"])
@@ -168,9 +138,10 @@ async def stop(req: Request, x_keepalive_secret: str | None = Header(default=Non
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+
 @app.post("/seek")
 async def seek(req: Request, x_keepalive_secret: str | None = Header(default=None)):
-    guard(x_keepalive_secret)
+    guard(SECRET, x_keepalive_secret)
     body = await _body(req)
     try:
         state = await player.seek(body["chatId"], body.get("delta", 0))
@@ -178,55 +149,41 @@ async def seek(req: Request, x_keepalive_secret: str | None = Header(default=Non
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+
 @app.post("/record/start")
-async def record_start(
-    payload: rec.StartRequest,
-    x_recording_secret: str | None = Header(default=None),
-    x_keepalive_secret: str | None = Header(default=None),
-):
-    _record_guard(x_recording_secret, x_keepalive_secret)
-    if rec.manager is None:
-        await _init_recording()
-    if rec.manager is None:
-        raise HTTPException(status_code=503, detail="service_not_ready")
-    try:
-        return await rec.manager.start(payload.chat_id, payload.started_by, payload.group_title, payload.title)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+async def record_start(req: Request, x_recording_secret: str | None = Header(default=None)):
+    guard(RECORDING_SECRET, x_recording_secret)
+    body = await _body(req)
+    manager = await _record_manager()
+    return await manager.start(
+        _chat_id(body),
+        str(body.get("started_by", body.get("startedBy", ""))),
+        str(body.get("group_title", body.get("groupTitle", ""))),
+        str(body.get("title", "")),
+    )
+
 
 @app.post("/record/stop")
-async def record_stop(
-    payload: rec.StopRequest,
-    x_recording_secret: str | None = Header(default=None),
-    x_keepalive_secret: str | None = Header(default=None),
-):
-    _record_guard(x_recording_secret, x_keepalive_secret)
-    if rec.manager is None:
-        await _init_recording()
-    if rec.manager is None:
-        raise HTTPException(status_code=503, detail="service_not_ready")
-    try:
-        return await rec.manager.stop(
-            payload.chat_id,
-            stopped_by=payload.stopped_by,
-            group_title=payload.group_title,
-            caption=payload.caption,
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+async def record_stop(req: Request, x_recording_secret: str | None = Header(default=None)):
+    guard(RECORDING_SECRET, x_recording_secret)
+    body = await _body(req)
+    manager = await _record_manager()
+    return await manager.stop(
+        _chat_id(body),
+        auto=bool(body.get("auto", False)),
+        stopped_by=str(body.get("stopped_by", body.get("stoppedBy", ""))),
+        group_title=str(body.get("group_title", body.get("groupTitle", ""))),
+        caption=str(body.get("caption", "")),
+    )
+
 
 @app.post("/record/status")
-async def record_status(
-    payload: rec.StatusRequest,
-    x_recording_secret: str | None = Header(default=None),
-    x_keepalive_secret: str | None = Header(default=None),
-):
-    _record_guard(x_recording_secret, x_keepalive_secret)
-    if rec.manager is None:
-        await _init_recording()
-    if rec.manager is None:
-        raise HTTPException(status_code=503, detail="service_not_ready")
-    return await rec.manager.status(payload.chat_id)
+async def record_status(req: Request, x_recording_secret: str | None = Header(default=None)):
+    guard(RECORDING_SECRET, x_recording_secret)
+    body = await _body(req)
+    manager = await _record_manager()
+    return await manager.status(_chat_id(body))
+
 
 # ===================== TikTok Routes (مستقلة) =====================
 
@@ -238,15 +195,22 @@ async def tiktok_start(body: dict = Body(...)):
     result = await tiktok_service.start(chat_id, url, video)
     return result
 
+
 @app.post("/tiktok/stop")
 async def tiktok_stop(body: dict = Body(...)):
     chat_id = int(body.get("chatId"))
     result = await tiktok_service.stop(chat_id)
     return result
 
+
 @app.post("/tiktok/state")
 async def tiktok_state(body: dict = Body(...)):
     chat_id = int(body.get("chatId"))
     result = await tiktok_service.get_state(chat_id)
     return {"ok": True, "state": result}
-# ================================================================
+
+
+if __name__ == "__main__":  # pragma: no cover
+    import uvicorn
+
+    uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("PORT", "10000")), reload=False)
