@@ -52,6 +52,23 @@ def _record_guard(x_recording_secret: str | None = None, x_keepalive_secret: str
         raise HTTPException(status_code=403, detail="forbidden")
 
 
+def _model_fields(model_cls: Any) -> set[str]:
+    fields = getattr(model_cls, "model_fields", None)
+    if isinstance(fields, dict) and fields:
+        return set(fields.keys())
+    ann = getattr(model_cls, "__annotations__", None)
+    if isinstance(ann, dict) and ann:
+        return set(ann.keys())
+    return set()
+
+
+def _build_model(model_cls: Any, data: dict[str, Any]) -> Any:
+    allowed = _model_fields(model_cls)
+    if allowed:
+        data = {k: v for k, v in data.items() if k in allowed}
+    return model_cls(**data)
+
+
 async def _init_recording() -> None:
     if getattr(rec, "manager", None) is not None:
         return
@@ -179,18 +196,39 @@ async def record_start(
 ):
     _record_guard(x_recording_secret, x_keepalive_secret)
     body = await _json(req)
-    payload = rec.StartRequest(
-        chat_id=str(body.get("chat_id", body.get("chatId", ""))).strip(),
-        started_by=str(body.get("started_by", body.get("startedBy", ""))).strip(),
-        group_title=str(body.get("group_title", body.get("groupTitle", ""))).strip(),
-        title=str(body.get("title", "")).strip(),
+
+    payload = _build_model(
+        rec.StartRequest,
+        {
+            "chat_id": str(body.get("chat_id", body.get("chatId", ""))).strip(),
+            "deliver_to": str(body.get("deliver_to", body.get("deliverTo", ""))).strip(),
+            "started_by": str(body.get("started_by", body.get("startedBy", ""))).strip(),
+            "group_title": str(body.get("group_title", body.get("groupTitle", ""))).strip(),
+            "title": str(body.get("title", "")).strip(),
+        },
     )
-    if not payload.chat_id:
+
+    if not getattr(payload, "chat_id", ""):
         raise HTTPException(status_code=400, detail="chat_id_required")
+
+    deliver_to = str(getattr(payload, "deliver_to", "") or body.get("deliver_to", body.get("deliverTo", "")) or "").strip()
+    if not deliver_to:
+        raise HTTPException(status_code=400, detail="deliver_to_required")
+
     manager = await rec.ensure_manager()
     if manager is None:
-        raise HTTPException(status_code=503, detail=f"service_not_ready: {getattr(rec, 'RECORDING_BACKEND_ERROR', '') or 'missing_env'}")
-    return await manager.start(payload.chat_id, payload.started_by, payload.group_title, payload.title)
+        raise HTTPException(
+            status_code=503,
+            detail=f"service_not_ready: {getattr(rec, 'RECORDING_BACKEND_ERROR', '') or 'missing_env'}",
+        )
+
+    return await manager.start(
+        payload.chat_id,
+        deliver_to,
+        getattr(payload, "started_by", ""),
+        getattr(payload, "group_title", ""),
+        getattr(payload, "title", ""),
+    )
 
 
 @app.post("/record/stop")
@@ -201,19 +239,40 @@ async def record_stop(
 ):
     _record_guard(x_recording_secret, x_keepalive_secret)
     body = await _json(req)
-    payload = rec.StopRequest(
-        chat_id=str(body.get("chat_id", body.get("chatId", ""))).strip(),
-        group_title=str(body.get("group_title", body.get("groupTitle", ""))).strip(),
-        stopped_by=str(body.get("stopped_by", body.get("stoppedBy", ""))).strip(),
-        caption=str(body.get("caption", "")).strip(),
-        auto=bool(body.get("auto", False)),
+
+    payload = _build_model(
+        rec.StopRequest,
+        {
+            "chat_id": str(body.get("chat_id", body.get("chatId", ""))).strip(),
+            "group_title": str(body.get("group_title", body.get("groupTitle", ""))).strip(),
+            "stopped_by": str(body.get("stopped_by", body.get("stoppedBy", ""))).strip(),
+            "caption": str(body.get("caption", "")).strip(),
+            "auto": bool(body.get("auto", False)),
+        },
     )
-    if not payload.chat_id:
+
+    if not getattr(payload, "chat_id", ""):
         raise HTTPException(status_code=400, detail="chat_id_required")
+
     manager = await rec.ensure_manager()
     if manager is None:
-        raise HTTPException(status_code=503, detail=f"service_not_ready: {getattr(rec, 'RECORDING_BACKEND_ERROR', '') or 'missing_env'}")
-    return await manager.stop(payload.chat_id, auto=payload.auto, stopped_by=payload.stopped_by, group_title=payload.group_title, caption=payload.caption)
+        raise HTTPException(
+            status_code=503,
+            detail=f"service_not_ready: {getattr(rec, 'RECORDING_BACKEND_ERROR', '') or 'missing_env'}",
+        )
+
+    auto = bool(getattr(payload, "auto", False))
+    stopped_by = getattr(payload, "stopped_by", "")
+    group_title = getattr(payload, "group_title", "")
+    caption = getattr(payload, "caption", "")
+
+    return await manager.stop(
+        payload.chat_id,
+        auto=auto,
+        stopped_by=stopped_by,
+        group_title=group_title,
+        caption=caption,
+    )
 
 
 @app.post("/record/status")
