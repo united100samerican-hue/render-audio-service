@@ -3,11 +3,11 @@ import logging
 import os
 import subprocess
 import time
-from asynccontextmanager import asynccontextmanager
+import threading
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
-import threading
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -15,8 +15,8 @@ from pydantic import BaseModel, Field
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
-logger = logging.getLogger("recording_service")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("recording_service")
 
 APP_NAME = "recording-service"
 ROOT = Path(os.getenv("RECORDINGS_ROOT", "/tmp/recording-service")).resolve()
@@ -33,28 +33,24 @@ MAX_RECORDING_MINUTES = int(os.getenv("MAX_RECORDING_MINUTES", "180"))
 OUTPUT_SAMPLE_RATE = int(os.getenv("OUTPUT_SAMPLE_RATE", "48000"))
 OUTPUT_CHANNELS = int(os.getenv("OUTPUT_CHANNELS", "1"))
 
-def _import_group_call_factory():
+def _import_pytgcalls_backend():
 last_error: Exception | None = None
-candidates = [
-("pytgcalls", "GroupCallFactory"),
-("pytgcalls.group_call_factory", "GroupCallFactory"),
-("pytgcalls.factory", "GroupCallFactory"),
-]
-for module_name, attr_name in candidates:
 try:
-module = import(module_name, fromlist=[attr_name])
-factory = getattr(module, attr_name)
-return factory
+from pytgcalls import GroupCallFactory  # type: ignore
+return ("group_call_factory", GroupCallFactory)
+except Exception as exc:
+last_error = exc
+try:
+from pytgcalls import PyTgCalls  # type: ignore
+return ("pytgcalls", PyTgCalls)
 except Exception as exc:
 last_error = exc
 raise ImportError(
-"Unable to import GroupCallFactory from this pytgcalls installation. "
-"The installed version exposes PyTgCalls at the top level, but this file uses "
-"the lower-level raw group-call recorder API. Please use the pytgcalls build "
-"that includes GroupCallFactory for recording, or adapt this file to the new API."
+"Unable to import a compatible pytgcalls backend. "
+"Install a version that exposes GroupCallFactory or PyTgCalls."
 ) from last_error
 
-GroupCallFactory = _import_group_call_factory()
+PytgCallsBackendKind, PytgCallsBackend = _import_pytgcalls_backend()
 
 CHUNK_PCM = "pcm"
 CHUNK_OGG = "ogg"
@@ -143,22 +139,30 @@ async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
             )
         except Exception:
             logger.exception("upload exception method=%s", method)
-
 return False, "telegram_send_failed"
 
 class RecorderManager:
 def init(self, client: TelegramClient) -> None:
 self.client = client
-try:
-self.factory = GroupCallFactory(
-self.client,
-mtproto_backend=GroupCallFactory.MTPROTO_CLIENT_TYPE.TELETHON,
-)
-except Exception:
-self.factory = GroupCallFactory(self.client)
 self.sessions: dict[str, RecorderSession] = {}
 self.lock = asyncio.Lock()
 self.write_lock = threading.Lock()
+
+    if PytgCallsBackendKind == "group_call_factory":
+        try:
+            self.factory = PytgCallsBackend(
+                self.client,
+                mtproto_backend=PytgCallsBackend.MTPROTO_CLIENT_TYPE.TELETHON,
+            )
+        except Exception:
+            self.factory = PytgCallsBackend(self.client)
+    else:
+        self.factory = PytgCallsBackend(self.client)
+        if not hasattr(self.factory, "get_raw_group_call"):
+            raise RuntimeError(
+                "The installed pytgcalls package exposes PyTgCalls but not get_raw_group_call(). "
+                "This recorder expects a backend that can create a raw group call."
+            )
 
 def _paths(self, chat_id: str) -> tuple[Path, Path]:
     d = rec_dir_for(chat_id)
@@ -467,4 +471,5 @@ return await manager.status(payload.chat_id)
 
 if name == "main":
 import uvicorn
+
 uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "10000")), reload=False)
