@@ -1,16 +1,13 @@
-import asyncio
 import os
 from typing import Any
 
 from fastapi import Body, FastAPI, Header, HTTPException, Request
-from telethon import TelegramClient
-from telethon.sessions import StringSession
 
 from player import VoicePlayer
 from tiktok_service import TikTokService
 import recording_service as rec
 
-app = FastAPI(title="Render Audio Service", version="2.1")
+app = FastAPI(title="Render Audio Service", version="2.2")
 
 player = VoicePlayer()
 tiktok_service = TikTokService()
@@ -34,7 +31,7 @@ async def _json(req: Request) -> dict[str, Any]:
 
 
 def _record_secrets() -> set[str]:
-    values = set()
+    values: set[str] = set()
     if SECRET:
         values.add(SECRET)
     secret = str(getattr(rec, "RECORDING_SECRET", "") or "").strip()
@@ -43,7 +40,10 @@ def _record_secrets() -> set[str]:
     return values
 
 
-def _record_guard(x_recording_secret: str | None = None, x_keepalive_secret: str | None = None) -> None:
+def _record_guard(
+    x_recording_secret: str | None = None,
+    x_keepalive_secret: str | None = None,
+) -> None:
     expected = _record_secrets()
     if not expected:
         return
@@ -52,7 +52,7 @@ def _record_guard(x_recording_secret: str | None = None, x_keepalive_secret: str
         raise HTTPException(status_code=403, detail="forbidden")
 
 
-def _model_fields(model_cls: Any) -> set[str]:
+def _field_names(model_cls: Any) -> set[str]:
     fields = getattr(model_cls, "model_fields", None)
     if isinstance(fields, dict) and fields:
         return set(fields.keys())
@@ -63,17 +63,30 @@ def _model_fields(model_cls: Any) -> set[str]:
 
 
 def _build_model(model_cls: Any, data: dict[str, Any]) -> Any:
-    allowed = _model_fields(model_cls)
+    allowed = _field_names(model_cls)
     if allowed:
         data = {k: v for k, v in data.items() if k in allowed}
     return model_cls(**data)
 
 
+async def _get_recording_manager():
+    manager = getattr(rec, "manager", None)
+    if manager is not None:
+        return manager
+    ensure = getattr(rec, "ensure_manager", None)
+    if callable(ensure):
+        try:
+            manager = await ensure()
+        except Exception:
+            manager = None
+        if manager is not None:
+            return manager
+    return getattr(rec, "manager", None)
+
+
 async def _init_recording() -> None:
-    if getattr(rec, "manager", None) is not None:
-        return
     try:
-        await rec.ensure_manager()
+        await _get_recording_manager()
     except Exception:
         return
 
@@ -208,27 +221,25 @@ async def record_start(
         },
     )
 
-    if not getattr(payload, "chat_id", ""):
-        raise HTTPException(status_code=400, detail="chat_id_required")
+    chat_id = str(getattr(payload, "chat_id", "")).strip()
+    deliver_to = str(getattr(payload, "deliver_to", "")).strip() or str(body.get("deliver_to", body.get("deliverTo", ""))).strip()
+    started_by = str(getattr(payload, "started_by", "")).strip()
+    group_title = str(getattr(payload, "group_title", "")).strip()
+    title = str(getattr(payload, "title", "")).strip()
 
-    deliver_to = str(getattr(payload, "deliver_to", "") or body.get("deliver_to", body.get("deliverTo", "")) or "").strip()
+    if not chat_id:
+        raise HTTPException(status_code=400, detail="chat_id_required")
     if not deliver_to:
         raise HTTPException(status_code=400, detail="deliver_to_required")
 
-    manager = await rec.ensure_manager()
+    manager = await _get_recording_manager()
     if manager is None:
         raise HTTPException(
             status_code=503,
             detail=f"service_not_ready: {getattr(rec, 'RECORDING_BACKEND_ERROR', '') or 'missing_env'}",
         )
 
-    return await manager.start(
-        payload.chat_id,
-        deliver_to,
-        getattr(payload, "started_by", ""),
-        getattr(payload, "group_title", ""),
-        getattr(payload, "title", ""),
-    )
+    return await manager.start(chat_id, deliver_to, started_by, group_title, title)
 
 
 @app.post("/record/stop")
@@ -244,34 +255,32 @@ async def record_stop(
         rec.StopRequest,
         {
             "chat_id": str(body.get("chat_id", body.get("chatId", ""))).strip(),
-            "group_title": str(body.get("group_title", body.get("groupTitle", ""))).strip(),
+            "deliver_to": str(body.get("deliver_to", body.get("deliverTo", ""))).strip(),
             "stopped_by": str(body.get("stopped_by", body.get("stoppedBy", ""))).strip(),
+            "group_title": str(body.get("group_title", body.get("groupTitle", ""))).strip(),
             "caption": str(body.get("caption", "")).strip(),
             "auto": bool(body.get("auto", False)),
         },
     )
 
-    if not getattr(payload, "chat_id", ""):
+    chat_id = str(getattr(payload, "chat_id", "")).strip()
+    if not chat_id:
         raise HTTPException(status_code=400, detail="chat_id_required")
 
-    manager = await rec.ensure_manager()
+    manager = await _get_recording_manager()
     if manager is None:
         raise HTTPException(
             status_code=503,
             detail=f"service_not_ready: {getattr(rec, 'RECORDING_BACKEND_ERROR', '') or 'missing_env'}",
         )
 
-    auto = bool(getattr(payload, "auto", False))
-    stopped_by = getattr(payload, "stopped_by", "")
-    group_title = getattr(payload, "group_title", "")
-    caption = getattr(payload, "caption", "")
-
     return await manager.stop(
-        payload.chat_id,
-        auto=auto,
-        stopped_by=stopped_by,
-        group_title=group_title,
-        caption=caption,
+        chat_id,
+        auto=bool(getattr(payload, "auto", False)),
+        deliver_to=str(getattr(payload, "deliver_to", "")).strip(),
+        stopped_by=str(getattr(payload, "stopped_by", "")).strip(),
+        group_title=str(getattr(payload, "group_title", "")).strip(),
+        caption=str(getattr(payload, "caption", "")).strip(),
     )
 
 
@@ -286,7 +295,8 @@ async def record_status(
     chat_id = str(body.get("chat_id", body.get("chatId", ""))).strip()
     if not chat_id:
         raise HTTPException(status_code=400, detail="chat_id_required")
-    manager = await rec.ensure_manager()
+
+    manager = await _get_recording_manager()
     if manager is None:
         return {
             "ok": True,
