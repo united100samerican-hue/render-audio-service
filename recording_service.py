@@ -2,8 +2,8 @@ import asyncio
 import logging
 import os
 import subprocess
-import threading
 import time
+import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +27,7 @@ RECORDING_SECRET = os.getenv("RECORDING_SECRET", "").strip()
 SESSION_STRING = os.getenv("SESSION_STRING", "").strip()
 API_ID = int(os.getenv("API_ID", "0") or 0)
 API_HASH = os.getenv("API_HASH", "").strip()
+
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "180"))
 MAX_RECORDING_MINUTES = int(os.getenv("MAX_RECORDING_MINUTES", "180"))
 OUTPUT_SAMPLE_RATE = int(os.getenv("OUTPUT_SAMPLE_RATE", "48000"))
@@ -34,13 +35,14 @@ OUTPUT_CHANNELS = int(os.getenv("OUTPUT_CHANNELS", "1"))
 
 
 def _import_pytgcalls_backend() -> Tuple[str, Any]:
-    """Support either GroupCallFactory or a PyTgCalls build with raw group-call support."""
     last_error: Optional[Exception] = None
+
     candidates = [
         ("pytgcalls", "GroupCallFactory"),
         ("pytgcalls.group_call_factory", "GroupCallFactory"),
         ("pytgcalls.factory", "GroupCallFactory"),
     ]
+
     for module_name, attr_name in candidates:
         try:
             module = __import__(module_name, fromlist=[attr_name])
@@ -48,25 +50,20 @@ def _import_pytgcalls_backend() -> Tuple[str, Any]:
             return "group_call_factory", factory
         except Exception as exc:
             last_error = exc
+
     try:
         from pytgcalls import PyTgCalls  # type: ignore
         return "pytgcalls", PyTgCalls
     except Exception as exc:
         last_error = exc
+
     raise ImportError(
         "No compatible pytgcalls backend was found. "
         "This service needs either GroupCallFactory or a PyTgCalls build that exposes raw group-call support."
     ) from last_error
 
 
-try:
-    PYTGCALLS_KIND, PYTGCALLS_BACKEND = _import_pytgcalls_backend()
-except Exception as exc:  # pragma: no cover
-    PYTGCALLS_KIND = "none"
-    PYTGCALLS_BACKEND = None
-    RECORDING_BACKEND_ERROR = f"pytgcalls_import_failed: {exc}"
-else:
-    RECORDING_BACKEND_ERROR = ""
+PYTGCALLS_KIND, PYTGCALLS_BACKEND = _import_pytgcalls_backend()
 
 
 @dataclass
@@ -141,13 +138,21 @@ async def tg_send_audio(deliver_to: str, path: Path, caption: str) -> tuple[bool
                     data = {"chat_id": deliver_to, "caption": caption or ""}
                     if method == "sendAudio":
                         data["supports_streaming"] = "true"
-                    r = await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}", data=data, files=files)
+
+                    r = await client.post(
+                        f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",
+                        data=data,
+                        files=files,
+                    )
+
                 try:
                     j = r.json()
                 except Exception:
                     j = None
+
                 if r.status_code < 400 and isinstance(j, dict) and j.get("ok"):
                     return True, method
+
                 logger.error(
                     "upload failed method=%s status=%s body=%s",
                     method,
@@ -156,17 +161,17 @@ async def tg_send_audio(deliver_to: str, path: Path, caption: str) -> tuple[bool
                 )
             except Exception:
                 logger.exception("upload exception method=%s", method)
+
     return False, "telegram_send_failed"
 
 
 class RecorderManager:
     def __init__(self, client: TelegramClient) -> None:
-        if PYTGCALLS_BACKEND is None:
-            raise RuntimeError(RECORDING_BACKEND_ERROR or "pytgcalls_backend_missing")
         self.client = client
         self.sessions: dict[str, RecorderSession] = {}
         self.lock = asyncio.Lock()
         self.write_lock = threading.Lock()
+
         if PYTGCALLS_KIND == "group_call_factory":
             try:
                 self.factory = PYTGCALLS_BACKEND(
@@ -177,11 +182,11 @@ class RecorderManager:
                 self.factory = PYTGCALLS_BACKEND(self.client)
         else:
             self.factory = PYTGCALLS_BACKEND(self.client)
-        if not hasattr(self.factory, "get_raw_group_call"):
-            raise RuntimeError(
-                "PyTgCalls is installed, but this build does not expose get_raw_group_call. "
-                "This recorder requires a backend that supports raw group calls."
-            )
+            if not hasattr(self.factory, "get_raw_group_call"):
+                raise RuntimeError(
+                    "PyTgCalls is installed, but this build does not expose get_raw_group_call(). "
+                    "This recorder requires a backend that supports raw group calls."
+                )
 
     def _paths(self, chat_id: str) -> tuple[Path, Path]:
         d = rec_dir_for(chat_id)
@@ -286,7 +291,12 @@ class RecorderManager:
             "64k",
             str(ogg_path),
         ]
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     async def stop(
         self,
@@ -398,63 +408,19 @@ client: Optional[TelegramClient] = None
 manager: Optional[RecorderManager] = None
 
 
-def _missing_required_env() -> list[str]:
-    missing = []
-    if not SESSION_STRING:
-        missing.append("SESSION_STRING")
-    if not API_ID:
-        missing.append("API_ID")
-    if not API_HASH:
-        missing.append("API_HASH")
-    return missing
-
-
-async def ensure_manager() -> Optional[RecorderManager]:
-    global client, manager, RECORDING_BACKEND_ERROR
-    if manager is not None:
-        return manager
-    missing = _missing_required_env()
-    if missing:
-        RECORDING_BACKEND_ERROR = f"missing_env: {','.join(missing)}"
-        return None
-    if PYTGCALLS_BACKEND is None:
-        return None
-    try:
-        client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
-        await client.start()
-        manager = RecorderManager(client)
-        RECORDING_BACKEND_ERROR = ""
-        return manager
-    except Exception as exc:
-        RECORDING_BACKEND_ERROR = f"startup_failed: {exc}"
-        logger.exception("ensure_manager_failed")
-        try:
-            if client is not None:
-                await client.disconnect()
-        except Exception:
-            pass
-        client = None
-        manager = None
-        return None
-
-
-def _check_secret(request: Request) -> None:
-    if not RECORDING_SECRET:
-        return
-    got = request.headers.get("x-recording-secret") or request.headers.get("x-keepalive-secret") or ""
-    if got != RECORDING_SECRET:
-        raise HTTPException(status_code=403, detail="forbidden")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global client, manager
+    if not SESSION_STRING or not API_ID or not API_HASH:
+        raise RuntimeError("Missing SESSION_STRING / API_ID / API_HASH")
+    client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+    await client.start()
+    manager = RecorderManager(client)
     try:
-        await ensure_manager()
         yield
     finally:
         try:
-            if manager is not None:
+            if manager:
                 for s in list(manager.sessions.values()):
                     if s.stop_task and not s.stop_task.done():
                         s.stop_task.cancel()
@@ -472,69 +438,71 @@ async def lifespan(app: FastAPI):
                     except Exception:
                         pass
         finally:
-            if client is not None:
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
-            manager = None
-            client = None
+            if client:
+                await client.disconnect()
 
 
 app = FastAPI(title=APP_NAME, lifespan=lifespan)
 
 
+def check_secret(request: Request) -> None:
+    if not RECORDING_SECRET:
+        return
+    got = request.headers.get("x-recording-secret") or request.headers.get("x-keepalive-secret") or ""
+    if got != RECORDING_SECRET:
+        raise HTTPException(status_code=403, detail="forbidden")
+
+
 @app.get("/health")
 async def health():
-    return {
-        "ok": True,
-        "service": APP_NAME,
-        "recording_backend": PYTGCALLS_BACKEND is not None,
-        "reason": RECORDING_BACKEND_ERROR or None,
-    }
+    return {"ok": True, "service": APP_NAME}
 
 
 @app.post("/record/start")
 async def record_start(payload: StartRequest, request: Request):
-    _check_secret(request)
-    current = await ensure_manager()
-    if current is None:
-        raise HTTPException(status_code=503, detail=f"service_not_ready: {RECORDING_BACKEND_ERROR or 'missing_env'}")
+    check_secret(request)
+    if manager is None:
+        raise HTTPException(status_code=503, detail="service_not_ready")
     try:
-        return await current.start(payload.chat_id, payload.deliver_to, payload.started_by, payload.group_title, payload.title)
+        return await manager.start(
+            payload.chat_id,
+            payload.deliver_to,
+            payload.started_by,
+            payload.group_title,
+            payload.title,
+        )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.exception("record_start_failed")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.post("/record/stop")
 async def record_stop(payload: StopRequest, request: Request):
-    _check_secret(request)
-    current = await ensure_manager()
-    if current is None:
-        raise HTTPException(status_code=503, detail=f"service_not_ready: {RECORDING_BACKEND_ERROR or 'missing_env'}")
+    check_secret(request)
+    if manager is None:
+        raise HTTPException(status_code=503, detail="service_not_ready")
     try:
-        return await current.stop(
+        return await manager.stop(
             payload.chat_id,
-            auto=False,
             deliver_to=payload.deliver_to,
             stopped_by=payload.stopped_by,
             group_title=payload.group_title,
             caption=payload.caption,
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.exception("record_stop_failed")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.post("/record/status")
 async def record_status(payload: StatusRequest, request: Request):
-    _check_secret(request)
-    current = await ensure_manager()
-    if current is None:
-        return {"ok": True, "recording": False, "service_ready": False, "reason": RECORDING_BACKEND_ERROR or "missing_env"}
-    return await current.status(payload.chat_id)
+    check_secret(request)
+    if manager is None:
+        raise HTTPException(status_code=503, detail="service_not_ready")
+    return await manager.status(payload.chat_id)
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "10000")), reload=False)
