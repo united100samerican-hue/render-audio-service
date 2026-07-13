@@ -461,7 +461,7 @@ async def health():
 @app.post("/record/start")
 async def record_start(payload: StartRequest, request: Request):
     check_secret(request)
-print("ENV_CHECK", {
+    print("ENV_CHECK", {
     "SESSION_STRING": bool(os.getenv("SESSION_STRING")),
     "API_ID": bool(os.getenv("API_ID")),
     "API_HASH": bool(os.getenv("API_HASH")),
