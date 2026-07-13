@@ -461,6 +461,13 @@ async def health():
 @app.post("/record/start")
 async def record_start(payload: StartRequest, request: Request):
     check_secret(request)
+print("ENV_CHECK", {
+    "SESSION_STRING": bool(os.getenv("SESSION_STRING")),
+    "API_ID": bool(os.getenv("API_ID")),
+    "API_HASH": bool(os.getenv("API_HASH")),
+    "BOT_TOKEN": bool(os.getenv("BOT_TOKEN")),
+    "RECORDING_SECRET": bool(os.getenv("RECORDING_SECRET")),
+})
     if manager is None:
         raise HTTPException(status_code=503, detail="service_not_ready")
     try:
