@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import logging
 import os
 from typing import Any
 
@@ -7,11 +10,13 @@ from player import VoicePlayer
 from tiktok_service import TikTokService
 import recording_service as rec
 
-app = FastAPI(title="Render Audio Service", version="2.2")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("app")
+
+app = FastAPI(title="Render Audio Service", version="2.3")
 
 player = VoicePlayer()
 tiktok_service = TikTokService()
-
 SECRET = os.getenv("KEEPALIVE_SECRET", "").strip()
 
 
@@ -69,26 +74,38 @@ def _build_model(model_cls: Any, data: dict[str, Any]) -> Any:
     return model_cls(**data)
 
 
+def _record_env_snapshot() -> dict[str, Any]:
+    return {
+        "SESSION_STRING": bool(getattr(rec, "SESSION_STRING", "")),
+        "API_ID": bool(getattr(rec, "API_ID", 0)),
+        "API_HASH": bool(getattr(rec, "API_HASH", "")),
+        "BOT_TOKEN": bool(getattr(rec, "BOT_TOKEN", "")),
+        "RECORDING_SECRET": bool(getattr(rec, "RECORDING_SECRET", "")),
+        "backend_available": bool(getattr(rec, "RECORDING_BACKEND_AVAILABLE", False)),
+        "backend_error": str(getattr(rec, "RECORDING_BACKEND_ERROR", "") or ""),
+    }
+
+
 async def _get_recording_manager():
     manager = getattr(rec, "manager", None)
     if manager is not None:
         return manager
+
     ensure = getattr(rec, "ensure_manager", None)
     if callable(ensure):
         try:
             manager = await ensure()
         except Exception:
+            logger.exception("recording ensure_manager failed")
             manager = None
         if manager is not None:
             return manager
+
     return getattr(rec, "manager", None)
 
 
 async def _init_recording() -> None:
-    try:
-        await _get_recording_manager()
-    except Exception:
-        return
+    await _get_recording_manager()
 
 
 @app.on_event("startup")
@@ -231,21 +248,19 @@ async def record_start(
         raise HTTPException(status_code=400, detail="chat_id_required")
     if not deliver_to:
         raise HTTPException(status_code=400, detail="deliver_to_required")
-print("ENV_CHECK", {
-    "SESSION_STRING": bool(os.getenv("SESSION_STRING")),
-    "API_ID": bool(os.getenv("API_ID")),
-    "API_HASH": bool(os.getenv("API_HASH")),
-    "BOT_TOKEN": bool(os.getenv("BOT_TOKEN")),
-    "RECORDING_SECRET": bool(os.getenv("RECORDING_SECRET")),
-})
+
+    logger.info("[REC][ENV]", extra={"env": _record_env_snapshot()})
+
     manager = await _get_recording_manager()
     if manager is None:
-        raise HTTPException(
-            status_code=503,
-            detail=f"service_not_ready: {getattr(rec, 'RECORDING_BACKEND_ERROR', '') or 'missing_env'}",
-        )
+        detail = str(getattr(rec, "RECORDING_BACKEND_ERROR", "") or "missing_env")
+        raise HTTPException(status_code=503, detail=f"service_not_ready: {detail}")
 
-    return await manager.start(chat_id, deliver_to, started_by, group_title, title)
+    try:
+        return await manager.start(chat_id, deliver_to, started_by, group_title, title)
+    except Exception as exc:
+        logger.exception("record_start_failed")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.post("/record/stop")
@@ -275,19 +290,21 @@ async def record_stop(
 
     manager = await _get_recording_manager()
     if manager is None:
-        raise HTTPException(
-            status_code=503,
-            detail=f"service_not_ready: {getattr(rec, 'RECORDING_BACKEND_ERROR', '') or 'missing_env'}",
-        )
+        detail = str(getattr(rec, "RECORDING_BACKEND_ERROR", "") or "missing_env")
+        raise HTTPException(status_code=503, detail=f"service_not_ready: {detail}")
 
-    return await manager.stop(
-        chat_id,
-        auto=bool(getattr(payload, "auto", False)),
-        deliver_to=str(getattr(payload, "deliver_to", "")).strip(),
-        stopped_by=str(getattr(payload, "stopped_by", "")).strip(),
-        group_title=str(getattr(payload, "group_title", "")).strip(),
-        caption=str(getattr(payload, "caption", "")).strip(),
-    )
+    try:
+        return await manager.stop(
+            chat_id,
+            auto=bool(getattr(payload, "auto", False)),
+            deliver_to=str(getattr(payload, "deliver_to", "")).strip(),
+            stopped_by=str(getattr(payload, "stopped_by", "")).strip(),
+            group_title=str(getattr(payload, "group_title", "")).strip(),
+            caption=str(getattr(payload, "caption", "")).strip(),
+        )
+    except Exception as exc:
+        logger.exception("record_stop_failed")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.post("/record/status")
@@ -298,6 +315,7 @@ async def record_status(
 ):
     _record_guard(x_recording_secret, x_keepalive_secret)
     body = await _json(req)
+
     chat_id = str(body.get("chat_id", body.get("chatId", ""))).strip()
     if not chat_id:
         raise HTTPException(status_code=400, detail="chat_id_required")
@@ -308,8 +326,9 @@ async def record_status(
             "ok": True,
             "recording": False,
             "service_ready": False,
-            "reason": getattr(rec, "RECORDING_BACKEND_ERROR", "") or "missing_env",
+            "reason": str(getattr(rec, "RECORDING_BACKEND_ERROR", "") or "missing_env"),
         }
+
     return await manager.status(chat_id)
 
 
@@ -331,4 +350,5 @@ async def tiktok_state(body: dict = Body(...)):
 
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn
+
     uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("PORT", "10000")), reload=False)
