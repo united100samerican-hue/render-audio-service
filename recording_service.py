@@ -411,15 +411,18 @@ manager: Optional[RecorderManager] = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global client, manager
+
     print("ENV_CHECK", {
-    "SESSION_STRING": bool(os.getenv("SESSION_STRING")),
-    "API_ID": bool(os.getenv("API_ID")),
-    "API_HASH": bool(os.getenv("API_HASH")),
-    "BOT_TOKEN": bool(os.getenv("BOT_TOKEN")),
-    "RECORDING_SECRET": bool(os.getenv("RECORDING_SECRET")),
-})
+        "SESSION_STRING": bool(os.getenv("SESSION_STRING")),
+        "API_ID": bool(os.getenv("API_ID")),
+        "API_HASH": bool(os.getenv("API_HASH")),
+        "BOT_TOKEN": bool(os.getenv("BOT_TOKEN")),
+        "RECORDING_SECRET": bool(os.getenv("RECORDING_SECRET")),
+    })
+
     if not SESSION_STRING or not API_ID or not API_HASH:
         raise RuntimeError("Missing SESSION_STRING / API_ID / API_HASH")
+
     client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
     await client.start()
     manager = RecorderManager(client)
