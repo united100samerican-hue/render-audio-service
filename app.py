@@ -231,7 +231,13 @@ async def record_start(
         raise HTTPException(status_code=400, detail="chat_id_required")
     if not deliver_to:
         raise HTTPException(status_code=400, detail="deliver_to_required")
-
+print("ENV_CHECK", {
+    "SESSION_STRING": bool(os.getenv("SESSION_STRING")),
+    "API_ID": bool(os.getenv("API_ID")),
+    "API_HASH": bool(os.getenv("API_HASH")),
+    "BOT_TOKEN": bool(os.getenv("BOT_TOKEN")),
+    "RECORDING_SECRET": bool(os.getenv("RECORDING_SECRET")),
+})
     manager = await _get_recording_manager()
     if manager is None:
         raise HTTPException(
